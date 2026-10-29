@@ -40,7 +40,7 @@ uv run olist-bronze --batch-id olist-mvp-2026-10-25
 
 O comando valida os oito CSVs definidos em `contracts/olist_mvp.yaml` e escreve um Parquet por fonte em `data/bronze/<batch_id>/`, junto com `ingestion_report.json`. Use o mesmo `batch_id` para substituir o diretório do lote anterior depois de montar a nova versão em uma pasta temporária; outro identificador cria outro lote. Assim não se acumulam cópias do mesmo lote, mas `_ingested_at` muda a cada execução. A rotina tenta restaurar o lote anterior se a promoção falhar, mas a troca envolve mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. CSVs ausentes, colunas obrigatórias ausentes, nulos em campos não anuláveis, tipos lógicos inválidos, chaves repetidas ou linhas malformadas bloqueiam a gravação. Colunas extras são mantidas. Valores de origem são gravados como texto; datas permanecem sem conversão/fuso. Geolocalização não é processada.
 
-Consulte [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para os resultados observados e limitações. Silver, Gold, orquestração e publicação ainda não foram implementados.
+Consulte [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para os resultados observados e limitações. Silver e Gold locais estão implementadas; orquestração externa e publicação remota seguem pendentes de decisão.
 
 ## Fora do MVP
 
@@ -49,7 +49,7 @@ Spark, Kafka, Iceberg, Delta Lake, object storage, ingestão contínua e Projeto
 
 ## Implementação atual: contratos e Bronze
 
-Esta seção descreve somente o que existe no código-fonte. Silver, Gold, orquestração e publicação remota continuam planejadas.
+Esta seção descreve somente o que existe no código-fonte. Silver e Gold locais estão implementadas. Airflow/GitHub Actions e publicação remota continuam pendentes de decisão.
 
 ### Fluxo executável
 
@@ -119,3 +119,22 @@ A reexecução é idempotente no sentido operacional de não anexar uma cópia a
 O `PROJECT-STATUS.md` registra a execução do lote `olist-mvp-2026-10-25`: oito fontes, 550.759 linhas, nenhum achado/erro no relatório, comparação de valores CSV/Parquet sem divergências e reexecução. Esses são resultados registrados naquela execução; este README não afirma que os comandos foram repetidos ao editar esta documentação.
 
 A Bronze preserva os campos como texto. Ela não converte datas ou valores monetários para tipos analíticos, não calcula métricas, não agrega pagamentos/avaliações e não cria tabelas relacionais. Isso pertence às etapas futuras. O carregamento atual usa pandas para ler cada CSV integralmente em memória; para arquivos muito maiores, leitura em chunks ou outro desenho de memória precisaria ser avaliado.
+
+
+### Silver e Gold implementadas
+
+A transformação usa dbt com DuckDB local. O `dbt-duckdb` lê os Parquets diretamente, sem copiá-los para tabelas de entrada. O comando `make transform` passa ao dbt o diretório do lote `BRONZE_DIR`.
+
+- **Silver (views):** `stg_orders` converte os timestamps necessários e mantém uma linha por pedido; `stg_order_reviews` converte a nota e preserva cada avaliação no grão de origem. Comentários livres e campos fora da pergunta analítica não seguem para esses modelos.
+- **Gold (tabelas):** `fct_delivery_reviews` agrega as avaliações por pedido antes do `LEFT JOIN`, preservando pedidos sem avaliação e garantindo uma linha por pedido. `mart_delivery_review_summary` resume por faixa de entrega.
+- **Faixas:** `early` significa entrega antes da data estimada; `on_time`, no mesmo dia; `late`, depois da data estimada; `not_delivered`, sem data real de entrega; `delivered_missing_timestamp`, status `delivered` sem data real. `delivery_delay_days` é negativo para antecipação, zero no dia e positivo para atraso. A comparação usa datas de calendário.
+- **Nota:** várias avaliações do mesmo pedido são primeiro resumidas pela média. A Gold calcula a média dessas médias, dando o mesmo peso a cada pedido avaliado, e apresenta separadamente a quantidade de pedidos avaliados e de registros de avaliação.
+- **Qualidade:** `dbt build` executa modelos e testes de nulos, unicidade, chave composta de avaliação, domínio da nota, relacionamento avaliação→pedido, preservação de contagem de pedidos e reconciliação da Gold. Falha retorna código não-zero. Não há etapa de publicação remota, então os resultados ficam no banco local.
+
+Para executar tudo em sequência, com falha da Bronze impedindo a transformação:
+
+```bash
+make pipeline BATCH_ID=olist-mvp-2026-10-25
+```
+
+O banco DuckDB fica em `data/warehouse.duckdb` (ignorado pelo Git). `make transform` pode ser usado para reconstruir as camadas sobre uma Bronze já existente. Resultados observados desta execução constam em `PROJECT-STATUS.md`.

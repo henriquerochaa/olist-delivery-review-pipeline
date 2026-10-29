@@ -1,0 +1,10 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Parquets produzidos pela ingestão Bronze.
+    meta:
+      external_location: "{{ var('bronze_dir') }}/{name}.parquet"
+    tables:
+      - name: olist_orders_dataset
+      - name: olist_order_reviews_dataset

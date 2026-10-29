@@ -1,0 +1,15 @@
+name: projeto1_pipeline_qualidade
+version: 1.0.0
+config-version: 2
+profile: projeto1_pipeline_qualidade
+model-paths: [models]
+test-paths: [tests]
+clean-targets:
+  - target
+  - dbt_packages
+models:
+  projeto1_pipeline_qualidade:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

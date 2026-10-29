@@ -1,0 +1,49 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: Pedidos tipados; mantém uma linha por pedido e datas ausentes como NULL.
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: estimated_delivery_at
+        data_tests: [not_null]
+
+  - name: stg_order_reviews
+    description: Avaliações tipadas no grão original; comentários livres ficam fora do modelo analítico.
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+      - name: review_id
+        data_tests: [not_null]
+      - name: review_score
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+
+  - name: fct_delivery_reviews
+    description: Uma linha por pedido, com avaliações agregadas antes do join.
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: delivery_bucket
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [early, on_time, late, not_delivered, delivered_missing_timestamp]
+      - name: review_count
+        data_tests: [not_null]
+    data_tests:
+      - orders_keys_match_bronze
+
+  - name: mart_delivery_review_summary
+    description: Resumo por situação de entrega; média de nota dá o mesmo peso a cada pedido.
+    columns:
+      - name: delivery_bucket
+        data_tests: [not_null, unique]
+      - name: order_count
+        data_tests: [not_null]
+    data_tests:
+      - summary_orders_reconcile

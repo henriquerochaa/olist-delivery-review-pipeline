@@ -3,6 +3,7 @@ name = "projeto1-pipeline-qualidade-dados"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "dbt-duckdb>=1.11.1",
     "pandas>=3.1.0",
     "pyarrow>=26.0.0",
     "pyyaml>=6.0.3",
