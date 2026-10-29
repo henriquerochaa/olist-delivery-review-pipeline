@@ -2,14 +2,9 @@
 
 Pipeline batch reproduzível para analisar a relação entre prazo de entrega e avaliação de clientes no Brazilian E-Commerce Public Dataset by Olist.
 
-## Comece por aqui
+## Sobre este repositório
 
-1. Leia [`AGENTS.md`](AGENTS.md) para as instruções de trabalho e o escopo.
-2. Leia [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para o retrato verificado do repositório e o próximo passo.
-3. Leia [`DECISOES-ARQUITETURA.md`](DECISOES-ARQUITETURA.md) para pergunta analítica, grãos, contratos e arquitetura pretendida.
-4. Consulte [`EXPLICACOES-TECNICAS.md`](EXPLICACOES-TECNICAS.md) para as explicações didáticas registradas durante a implementação guiada.
-
-Este projeto está sendo construído por Henrique junto com uma IA. A IA deve explicar cada etapa e decisão, trabalhar em incrementos compreensíveis e manter o status atualizado. A documentação descreve intenção; só código-fonte e execução verificável comprovam implementação.
+Este README é a documentação pública de instalação, arquitetura e execução. O repositório contém o pipeline local e os contratos das fontes; dados brutos, saídas de execução, instruções internas para agentes e notas pessoais ficam fora do versionamento.
 
 ## Pergunta analítica
 
@@ -21,11 +16,11 @@ Como o desempenho da entrega — comparando datas estimadas e reais — se relac
 CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold → publicação aprovada
 ```
 
-O MVP é local e batch sob demanda, orquestrado pelo Airflow. A DAG local está implementada; publicação remota continua fora até a escolha de destino. Veja `DECISOES-ARQUITETURA.md` e `PROJECT-STATUS.md` para decisões e evidências.
+O MVP é local e batch sob demanda, orquestrado pelo Airflow. A DAG local está implementada; publicação remota continua fora até a escolha de destino.
 
 ## Dados
 
-Os CSVs da Olist estão na pasta local `dataset-ecommerce-brasil/`. O `.gitignore` exclui essa pasta e dados derivados para evitar versionar datasets e artefatos. A lista de fontes, contagens observadas e regras de grão está em `DECISOES-ARQUITETURA.md`.
+Os CSVs da Olist devem estar na pasta local `dataset-ecommerce-brasil/`. O `.gitignore` exclui essa pasta e dados derivados para evitar versionar datasets e artefatos. O índice e os contratos em `contracts/` declaram as fontes incluídas e o grão de cada uma.
 
 IDs devem ser lidos como texto. Pagamentos e avaliações têm cardinalidade que precisa ser medida e tratada antes de joins. Não inclua geolocalização ou marketing no MVP sem revisar o escopo.
 
@@ -40,7 +35,7 @@ uv run olist-bronze --batch-id olist-mvp-2026-10-25
 
 O comando valida os oito CSVs definidos em `contracts/olist_mvp.yaml` e escreve um Parquet por fonte em `data/bronze/<batch_id>/`, junto com `ingestion_report.json`. Use o mesmo `batch_id` para substituir o diretório do lote anterior depois de montar a nova versão em uma pasta temporária; outro identificador cria outro lote. Assim não se acumulam cópias do mesmo lote, mas `_ingested_at` muda a cada execução. A rotina tenta restaurar o lote anterior se a promoção falhar, mas a troca envolve mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. CSVs ausentes, colunas obrigatórias ausentes, nulos em campos não anuláveis, tipos lógicos inválidos, chaves repetidas ou linhas malformadas bloqueiam a gravação. Colunas extras são mantidas. Valores de origem são gravados como texto; datas permanecem sem conversão/fuso. Geolocalização não é processada.
 
-Consulte [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para os resultados observados e limitações. Silver, Gold e DAG local do Airflow estão implementadas; a publicação remota continua pendente de decisão.
+Silver, Gold e DAG local do Airflow estão implementadas; a publicação remota continua pendente de decisão.
 
 ## Fora do MVP
 
@@ -116,7 +111,7 @@ A reexecução é idempotente no sentido operacional de não anexar uma cópia a
 
 ### Resultado documentado e limites
 
-O `PROJECT-STATUS.md` registra a execução do lote `olist-mvp-2026-10-25`: oito fontes, 550.759 linhas, nenhum achado/erro no relatório, comparação de valores CSV/Parquet sem divergências e reexecução. Esses são resultados registrados naquela execução; este README não afirma que os comandos foram repetidos ao editar esta documentação.
+Uma execução registrada do lote `olist-mvp-2026-10-25` processou oito fontes e 550.759 linhas, sem achados ou erros no relatório. Comparações CSV/Parquet não encontraram divergências, e a reexecução do lote foi verificada.
 
 A Bronze preserva os campos como texto. Ela não converte datas ou valores monetários para tipos analíticos, não calcula métricas, não agrega pagamentos/avaliações e não cria tabelas relacionais. Isso pertence às etapas futuras. O carregamento atual usa pandas para ler cada CSV integralmente em memória; para arquivos muito maiores, leitura em chunks ou outro desenho de memória precisaria ser avaliado.
 
@@ -137,7 +132,7 @@ Para executar tudo em sequência, com falha da Bronze impedindo a transformaçã
 make pipeline BATCH_ID=olist-mvp-2026-10-25
 ```
 
-O banco DuckDB fica em `data/warehouse.duckdb` (ignorado pelo Git). `make transform` pode ser usado para reconstruir as camadas sobre uma Bronze já existente. Resultados observados desta execução constam em `PROJECT-STATUS.md`.
+O banco DuckDB fica em `data/warehouse.duckdb` (ignorado pelo Git). `make transform` pode ser usado para reconstruir as camadas sobre uma Bronze já existente.
 
 
 ## Orquestração local com Airflow

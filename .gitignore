@@ -1,7 +1,24 @@
 # Segredos e configurações locais
-.env
-.env.*
+.env*
 !.env.example
+.envrc
+.secrets/
+secrets.*
+*.secret
+*.secret.*
+credentials.*
+service-account*.json
+*.pem
+*.p12
+*.pfx
+.ssh/
+
+# Orientações internas e documentação pessoal
+AGENTS.md
+CONTEXTO-DA-CONVERSA.md
+DECISOES-ARQUITETURA.md
+EXPLICACOES-TECNICAS.md
+PROJECT-STATUS.md
 
 # Estado local do Airflow
 .airflow/
@@ -11,9 +28,19 @@
 venv/
 __pycache__/
 *.py[cod]
+.python-version.local
 .pytest_cache/
 .ruff_cache/
 .ty/
+.mypy_cache/
+.tox/
+.nox/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
 
 # Dataset original e dados derivados
 dataset-ecommerce-brasil/
@@ -37,3 +64,9 @@ dbt_pipeline_qualidade/.user.yml
 .vscode/
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+*.log
+*.sqlite
+*.sqlite3
+*.db
