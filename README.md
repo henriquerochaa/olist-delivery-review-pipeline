@@ -1,0 +1,121 @@
+# Projeto 1 — Pipeline de qualidade de dados
+
+Pipeline batch reproduzível para analisar a relação entre prazo de entrega e avaliação de clientes no Brazilian E-Commerce Public Dataset by Olist.
+
+## Comece por aqui
+
+1. Leia [`AGENTS.md`](AGENTS.md) para as instruções de trabalho e o escopo.
+2. Leia [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para o retrato verificado do repositório e o próximo passo.
+3. Leia [`DECISOES-ARQUITETURA.md`](DECISOES-ARQUITETURA.md) para pergunta analítica, grãos, contratos e arquitetura pretendida.
+4. Consulte [`EXPLICACOES-TECNICAS.md`](EXPLICACOES-TECNICAS.md) para as explicações didáticas registradas durante a implementação guiada.
+
+Este projeto está sendo construído por Henrique junto com uma IA. A IA deve explicar cada etapa e decisão, trabalhar em incrementos compreensíveis e manter o status atualizado. A documentação descreve intenção; só código-fonte e execução verificável comprovam implementação.
+
+## Pergunta analítica
+
+Como o desempenho da entrega — comparando datas estimadas e reais — se relaciona às notas de avaliação? A análise deve preservar os casos sem entrega ou sem avaliação e controlar a granularidade para não duplicar métricas.
+
+## Arquitetura prevista
+
+```text
+CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold → publicação aprovada
+```
+
+O MVP é local e batch sob demanda. O escopo de publicação e a escolha entre Airflow e GitHub Actions precisam ser reconciliados antes de implementar essas integrações. Veja `DECISOES-ARQUITETURA.md`; não use este diagrama como evidência de que as etapas já existem.
+
+## Dados
+
+Os CSVs da Olist estão na pasta local `dataset-ecommerce-brasil/`. O `.gitignore` exclui essa pasta e dados derivados para evitar versionar datasets e artefatos. A lista de fontes, contagens observadas e regras de grão está em `DECISOES-ARQUITETURA.md`.
+
+IDs devem ser lidos como texto. Pagamentos e avaliações têm cardinalidade que precisa ser medida e tratada antes de joins. Não inclua geolocalização ou marketing no MVP sem revisar o escopo.
+
+## Ambiente e execução Bronze
+
+Use Python 3.11 ou superior e [uv](https://docs.astral.sh/uv/). O `pyproject.toml` declara as dependências diretas e o `uv.lock` fixa a resolução reproduzível:
+
+```bash
+uv sync
+uv run olist-bronze --batch-id olist-mvp-2026-10-25
+```
+
+O comando valida os oito CSVs definidos em `contracts/olist_mvp.yaml` e escreve um Parquet por fonte em `data/bronze/<batch_id>/`, junto com `ingestion_report.json`. Use o mesmo `batch_id` para substituir o diretório do lote anterior depois de montar a nova versão em uma pasta temporária; outro identificador cria outro lote. Assim não se acumulam cópias do mesmo lote, mas `_ingested_at` muda a cada execução. A rotina tenta restaurar o lote anterior se a promoção falhar, mas a troca envolve mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. CSVs ausentes, colunas obrigatórias ausentes, nulos em campos não anuláveis, tipos lógicos inválidos, chaves repetidas ou linhas malformadas bloqueiam a gravação. Colunas extras são mantidas. Valores de origem são gravados como texto; datas permanecem sem conversão/fuso. Geolocalização não é processada.
+
+Consulte [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para os resultados observados e limitações. Silver, Gold, orquestração e publicação ainda não foram implementados.
+
+## Fora do MVP
+
+Spark, Kafka, Iceberg, Delta Lake, object storage, ingestão contínua e Projeto 2. Neon e orquestração remota só entram após decisão e validação do MVP local.
+
+
+## Implementação atual: contratos e Bronze
+
+Esta seção descreve somente o que existe no código-fonte. Silver, Gold, orquestração e publicação remota continuam planejadas.
+
+### Fluxo executável
+
+```text
+contracts/olist_mvp.yaml + contratos individuais
+        ↓ load_contracts
+CSV local ──→ validate_sources ── falha? relatório de bloqueio e encerramento
+        ↓ aprovado
+pandas.read_csv (texto) → metadados → Parquet via PyArrow
+        ↓
+relatório JSON + substituição do diretório do batch_id
+```
+
+O comando parte da raiz do repositório:
+
+```bash
+uv sync
+uv run olist-bronze --batch-id olist-mvp-2026-10-25
+```
+
+`--batch-id` identifica o lote lógico. Repetir o mesmo identificador substitui sua pasta; usar outro cria outra pasta. Os padrões são `contracts/olist_mvp.yaml` e `data/bronze`, configuráveis por `--contracts` e `--output-dir`. A validação percorre os CSVs e a ingestão os lê novamente; por isso a premissa operacional é que os arquivos de origem não mudem durante a execução.
+
+### Código-fonte e responsabilidades
+
+- `contracts.py`: `ContractDefinitionError` representa erro na definição YAML; `_matches_logical_type` verifica se cada valor atende ao tipo lógico sem transformá-lo; `load_contracts` lê e valida o índice e os oito contratos; `validate_sources` verifica a estrutura e o conteúdo dos CSVs e devolve um relatório sem incluir valores das linhas. A validação registra números de linha de amostra, não os valores pessoais nelas.
+- `bronze.py`: `IngestionBlocked` sinaliza dados reprovados pelos contratos; `_write_json` grava relatórios por arquivo temporário e substituição; `ingest_batch` valida, monta Parquets em staging, grava relatório e promove a pasta do lote; `main` interpreta argumentos CLI, mostra resumo e retorna código de saída 0 ou 1.
+- `tests/test_contracts_and_bronze.py`: fixtures pequenas exercitam aceitação de colunas extras, bloqueio de coluna ausente/nulo proibido, substituição do mesmo lote sem acumular arquivos e bloqueio da gravação com relatório quando a entrada é inválida.
+
+### Funções e decisões importantes
+
+`_matches_logical_type(value, logical_type)` aceita texto sem conversão; tenta `int` para inteiro; usa `Decimal` e exige valor finito para decimal; e para timestamp exige formato de data/hora ISO reconhecido, sem fuso. A checagem de timestamp combina expressão regular e `datetime.fromisoformat`: a expressão limita o formato esperado e o parser rejeita datas impossíveis. A função retorna falso para tipos não suportados ou valores inválidos.
+
+`load_contracts(index_path)` resolve o caminho do índice, carrega YAML com `yaml.safe_load`, confirma exatamente oito arquivos/contratos, impede caminhos nos nomes, duplicações, inconsistência entre arquivos incluídos e contratos, inclusão de geolocalização e chaves vazias, repetidas, não declaradas ou anuláveis. Também confirma os tipos lógicos permitidos e retorna a pasta de origem junto da lista dos contratos. Erros de leitura ou YAML são convertidos em `ContractDefinitionError`, preservando a causa original.
+
+`validate_sources(raw_dir, contracts)` processa cada fonte. Verifica existência e cabeçalho, cabeçalhos duplicados, colunas obrigatórias ausentes, colunas extras (aceitas e reportadas), colisão com nomes reservados de metadados, largura de cada linha, campos nulos proibidos, tipo lógico e unicidade da chave. Não para no primeiro problema: acumula regras e amostras de números de linha para diagnóstico. O retorno contém `passed`, detalhes por arquivo, `issue_count` (regras/problemas registrados) e `error_count` (ocorrências, com valor padrão 1 para regras sem contagem explícita). A escala CSV conta registros lógicos, não necessariamente linhas físicas quando há campos multilinha entre aspas.
+
+`ingest_batch(...)` primeiro restringe `batch_id` a 1–100 caracteres seguros para nomes de pasta. Carrega contratos e valida todas as fontes antes de escrever Parquet. Define horário UTC, cria relatório com contagens e caminhos; se reprovado, salva em `data/bronze/_reports/<batch_id>.json` e lança `IngestionBlocked`. Se aprovado, lê cada CSV com pandas como string, desativa inferência de valores ausentes, verifica se a contagem ainda bate com a validação, acrescenta `_batch_id`, `_ingested_at` e `_source_file`, e grava Parquet usando engine PyArrow. A pasta temporária é promovida ao destino; se já existe uma saída do mesmo lote, ela é movida para backup e restaurada se a promoção falhar. O backup é removido após sucesso. Erros durante a execução limpam staging quando possível, registram falha e relançam a exceção.
+
+A reexecução é idempotente no sentido operacional de não anexar uma cópia adicional do lote: a pasta anterior é substituída. Não é uma transação de filesystem com garantia contra queda de energia entre renomeações, nem produz arquivos idênticos byte a byte: o timestamp de ingestão muda. Não há coordenação para duas execuções concorrentes com o mesmo `batch_id`. Se a validação falhar numa tentativa posterior, a saída anteriormente bem-sucedida permanece; consumidores devem conferir o relatório da tentativa, para não confundir uma saída antiga com o resultado atual.
+
+`main()` usa `argparse` para os argumentos, captura erros esperados de contrato/ingestão/arquivo/valor, escreve a mensagem em stderr e retorna 1. No sucesso imprime JSON resumido e retorna 0. `if __name__ == "__main__"` permite execução como módulo/script; o entry point `olist-bronze` do `pyproject.toml` chama a mesma função.
+
+### Bibliotecas e ferramentas
+
+| Dependência | Uso efetivo |
+|---|---|
+| Python padrão: `csv` | Percorre CSVs e detecta estrutura antes da ingestão. `newline=""` deixa o módulo tratar corretamente as convenções de newline; `utf-8-sig` aceita UTF-8 com BOM. |
+| `pathlib.Path` | Manipula caminhos e operações de arquivo de forma independente de concatenação manual de strings. |
+| `re` | Valida o formato do timestamp e o identificador seguro do lote. |
+| `datetime` / `UTC` | Valida timestamps sem fuso na origem e registra o momento da ingestão em UTC. |
+| `decimal.Decimal` | Valida números decimais sem a aproximação binária típica de `float`. |
+| `typing.Any` | Tipagem auxiliar para estruturas carregadas de YAML/JSON, cujo formato é dinâmico. |
+| `json` | Serializa relatório legível por máquina. |
+| `uuid` | Gera nomes temporários únicos para gravação, staging e backup. |
+| `shutil` | Remove staging/backup de diretórios após falhas ou promoção concluída. |
+| `argparse` / `sys` | Interface de linha de comando e mensagens/códigos de erro. |
+| `PyYAML` (`yaml.safe_load`) | Lê contratos YAML sem construir objetos arbitrários do Python. YAML é configuração declarativa; a lógica executada continua no Python. |
+| `pandas` | Lê cada arquivo para um DataFrame e preserva campos como strings antes da gravação. Não faz análise de entrega nesta etapa. |
+| `PyArrow` | Engine que `DataFrame.to_parquet` usa para serializar os dados no formato Parquet. |
+| `uv` | Resolve/instala dependências declaradas; `uv.lock` fixa a resolução para instalação reproduzível. Não executa a lógica de qualidade. |
+| `pytest` | Executa os testes automatizados. |
+| `Ruff` | Formata e analisa problemas comuns de Python. |
+| `ty` | Verifica estaticamente compatibilidade de tipos. |
+
+### Resultado documentado e limites
+
+O `PROJECT-STATUS.md` registra a execução do lote `olist-mvp-2026-10-25`: oito fontes, 550.759 linhas, nenhum achado/erro no relatório, comparação de valores CSV/Parquet sem divergências e reexecução. Esses são resultados registrados naquela execução; este README não afirma que os comandos foram repetidos ao editar esta documentação.
+
+A Bronze preserva os campos como texto. Ela não converte datas ou valores monetários para tipos analíticos, não calcula métricas, não agrega pagamentos/avaliações e não cria tabelas relacionais. Isso pertence às etapas futuras. O carregamento atual usa pandas para ler cada CSV integralmente em memória; para arquivos muito maiores, leitura em chunks ou outro desenho de memória precisaria ser avaliado.

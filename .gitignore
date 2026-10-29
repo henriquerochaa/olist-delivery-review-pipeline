@@ -1,0 +1,36 @@
+# Segredos e configurações locais
+.env
+.env.*
+!.env.example
+
+# Ambientes Python e caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ty/
+
+# Dataset original e dados derivados
+dataset-ecommerce-brasil/
+data/raw/
+data/bronze/*
+!data/bronze/.gitkeep
+data/silver/*
+!data/silver/.gitkeep
+data/gold/*
+!data/gold/.gitkeep
+data/warehouse.duckdb*
+
+# Artefatos dbt
+dbt_pipeline_qualidade/target/
+dbt_pipeline_qualidade/dbt_packages/
+dbt_pipeline_qualidade/logs/
+dbt_pipeline_qualidade/.user.yml
+
+# IDE e sistema operacional
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

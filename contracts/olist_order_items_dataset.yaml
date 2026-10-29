@@ -1,0 +1,47 @@
+contract_version: 1
+scope: olist_mvp
+source_directory: ../dataset-ecommerce-brasil
+required_columns_policy: all columns listed in columns are required; missing any required
+  column fails ingestion
+extra_columns_policy: accept and preserve all extra source columns
+source_rows_policy: preserve every source row; never silently drop rows
+identifier_policy: read IDs and postal code prefixes as strings
+datetime_policy: logical type is timestamp without timezone; preserve original source
+  text in Bronze and do not assign a timezone
+null_policy: preserve allowed source nulls; nulls in non-nullable columns are blocking
+  validation errors that stop downstream processing; report the issue without silently
+  dropping the source row
+source_file: olist_order_items_dataset.csv
+grain: one row per order item
+primary_key:
+- order_id
+- order_item_id
+columns:
+  order_id:
+    logical_type: string
+    nullable: false
+    bronze_representation: string_preserved_from_source
+  order_item_id:
+    logical_type: integer
+    nullable: false
+    bronze_representation: string_preserved_from_source
+  product_id:
+    logical_type: string
+    nullable: false
+    bronze_representation: string_preserved_from_source
+  seller_id:
+    logical_type: string
+    nullable: false
+    bronze_representation: string_preserved_from_source
+  shipping_limit_date:
+    logical_type: timestamp_without_timezone
+    nullable: false
+    bronze_representation: string_preserved_from_source
+  price:
+    logical_type: decimal
+    nullable: false
+    bronze_representation: string_preserved_from_source
+  freight_value:
+    logical_type: decimal
+    nullable: false
+    bronze_representation: string_preserved_from_source
