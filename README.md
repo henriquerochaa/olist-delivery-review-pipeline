@@ -21,7 +21,7 @@ Como o desempenho da entrega — comparando datas estimadas e reais — se relac
 CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold → publicação aprovada
 ```
 
-O MVP é local e batch sob demanda. O escopo de publicação e a escolha entre Airflow e GitHub Actions precisam ser reconciliados antes de implementar essas integrações. Veja `DECISOES-ARQUITETURA.md`; não use este diagrama como evidência de que as etapas já existem.
+O MVP é local e batch sob demanda, orquestrado pelo Airflow. A DAG local está implementada; publicação remota continua fora até a escolha de destino. Veja `DECISOES-ARQUITETURA.md` e `PROJECT-STATUS.md` para decisões e evidências.
 
 ## Dados
 
@@ -40,16 +40,16 @@ uv run olist-bronze --batch-id olist-mvp-2026-10-25
 
 O comando valida os oito CSVs definidos em `contracts/olist_mvp.yaml` e escreve um Parquet por fonte em `data/bronze/<batch_id>/`, junto com `ingestion_report.json`. Use o mesmo `batch_id` para substituir o diretório do lote anterior depois de montar a nova versão em uma pasta temporária; outro identificador cria outro lote. Assim não se acumulam cópias do mesmo lote, mas `_ingested_at` muda a cada execução. A rotina tenta restaurar o lote anterior se a promoção falhar, mas a troca envolve mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. CSVs ausentes, colunas obrigatórias ausentes, nulos em campos não anuláveis, tipos lógicos inválidos, chaves repetidas ou linhas malformadas bloqueiam a gravação. Colunas extras são mantidas. Valores de origem são gravados como texto; datas permanecem sem conversão/fuso. Geolocalização não é processada.
 
-Consulte [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para os resultados observados e limitações. Silver e Gold locais estão implementadas; orquestração externa e publicação remota seguem pendentes de decisão.
+Consulte [`PROJECT-STATUS.md`](PROJECT-STATUS.md) para os resultados observados e limitações. Silver, Gold e DAG local do Airflow estão implementadas; a publicação remota continua pendente de decisão.
 
 ## Fora do MVP
 
-Spark, Kafka, Iceberg, Delta Lake, object storage, ingestão contínua e Projeto 2. Neon e orquestração remota só entram após decisão e validação do MVP local.
+Spark, Kafka, Iceberg, Delta Lake, object storage, ingestão contínua, GitHub Actions e Projeto 2 ficam fora deste MVP. Airflow local foi escolhido por Henrique; Neon continua fora até a publicação ser confirmada.
 
 
 ## Implementação atual: contratos e Bronze
 
-Esta seção descreve somente o que existe no código-fonte. Silver e Gold locais estão implementadas. Airflow/GitHub Actions e publicação remota continuam pendentes de decisão.
+Esta seção descreve somente o que existe no código-fonte. Silver, Gold e Airflow local estão implementados. A publicação remota no Neon continua pendente de decisão.
 
 ### Fluxo executável
 
@@ -138,3 +138,26 @@ make pipeline BATCH_ID=olist-mvp-2026-10-25
 ```
 
 O banco DuckDB fica em `data/warehouse.duckdb` (ignorado pelo Git). `make transform` pode ser usado para reconstruir as camadas sobre uma Bronze já existente. Resultados observados desta execução constam em `PROJECT-STATUS.md`.
+
+
+## Orquestração local com Airflow
+
+Henrique escolheu Airflow como orquestrador. A DAG `olist_delivery_review_pipeline` tem duas tarefas sequenciais: ingestão Bronze e `dbt build` (transformação + testes). Ambas chamam os mesmos alvos do Makefile usados na execução manual; não duplicam as regras do pipeline.
+
+A DAG não tem calendário (`schedule=None`) nem backfill (`catchup=False`): o dataset é histórico e a execução é manual. O parâmetro `batch_id` tem validação de caracteres e tamanho; execuções simultâneas da DAG são limitadas a uma; retries automáticos ficam em zero para não repetir falhas determinísticas de contrato.
+
+Airflow tem um ambiente `uv` separado em `airflow/`, travado com constraints oficiais para Airflow 3.3.2 e Python 3.14. Isso evita misturar as dependências de orquestração com as do pipeline analítico. O banco SQLite e logs locais ficam em `.airflow/`, ignorado pelo Git. O modo `standalone` é para desenvolvimento local, não produção; ele cria acesso administrativo local e informa as credenciais no terminal. Consulte o [Quick Start oficial do Airflow](https://airflow.apache.org/docs/apache-airflow/stable/start.html).
+
+Para iniciar a interface local:
+
+```bash
+make airflow
+```
+
+Para executar uma DAG de teste ponta a ponta, sem iniciar a interface:
+
+```bash
+make airflow-test
+```
+
+A DAG testada usa por padrão o lote `olist-mvp-2026-10-25`; na interface, o parâmetro `batch_id` pode selecionar outro lote presente em `data/bronze` ou reconstruir o lote usando os CSVs locais. O dataset precisa existir no caminho indicado pelos contratos.

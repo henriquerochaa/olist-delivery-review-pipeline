@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Estado local do Airflow
+.airflow/
+
 # Ambientes Python e caches
 .venv/
 venv/
