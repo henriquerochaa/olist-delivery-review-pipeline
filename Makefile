@@ -19,10 +19,10 @@ test:
 	uv run pytest -q
 
 lint:
-	uv run ruff check src tests
+	uv run ruff check src tests airflow/dags
 
 format:
-	uv run ruff format --check src tests
+	uv run ruff format --check src tests airflow/dags
 
 typecheck:
 	uv run ty check src tests

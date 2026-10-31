@@ -1,6 +1,6 @@
 contract_version: 1
 name: olist_mvp_input_contracts
-status: proposta_para_revisao
+status: vigente_no_mvp
 source_directory: ../dataset-ecommerce-brasil
 included_files:
 - olist_customers_dataset.csv

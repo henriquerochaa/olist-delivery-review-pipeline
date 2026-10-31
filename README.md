@@ -10,23 +10,25 @@ Este README é a documentação pública de instalação, arquitetura e execuç�
 
 Como o desempenho da entrega — comparando datas estimadas e reais — se relaciona às notas de avaliação? A análise deve preservar os casos sem entrega ou sem avaliação e controlar a granularidade para não duplicar métricas.
 
-## Arquitetura prevista
+## Arquitetura
 
 ```text
-CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold → publicação aprovada
+CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold
+        └──────────── orquestrado por Airflow (DAG local, manual) ────────────┘
+                                              publicação remota: não decidida
 ```
 
-O MVP é local e batch sob demanda, orquestrado pelo Airflow. A DAG local está implementada; publicação remota continua fora até a escolha de destino.
+O MVP é local e batch sob demanda, orquestrado pelo Airflow. Bronze, Silver, Gold e a DAG local estão implementadas; a publicação remota não existe e continua fora até a escolha de destino.
 
 ## Dados
 
-Os CSVs da Olist devem estar na pasta local `dataset-ecommerce-brasil/`. O `.gitignore` exclui essa pasta e dados derivados para evitar versionar datasets e artefatos. O índice e os contratos em `contracts/` declaram as fontes incluídas e o grão de cada uma.
+Fonte: [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) (Kaggle; confira os termos de uso vigentes antes de redistribuir). Baixe os CSVs manualmente — o repositório não os inclui nem tem script de download — e coloque-os na pasta local `dataset-ecommerce-brasil/`, na raiz. O `.gitignore` exclui essa pasta e dados derivados para evitar versionar datasets e artefatos. O índice e os contratos em `contracts/` declaram as fontes incluídas e o grão de cada uma.
 
 IDs devem ser lidos como texto. Pagamentos e avaliações têm cardinalidade que precisa ser medida e tratada antes de joins. Não inclua geolocalização ou marketing no MVP sem revisar o escopo.
 
 ## Ambiente e execução Bronze
 
-Use Python 3.11 ou superior e [uv](https://docs.astral.sh/uv/). O `pyproject.toml` declara as dependências diretas e o `uv.lock` fixa a resolução reproduzível:
+Use [uv](https://docs.astral.sh/uv/) e Python 3.11 ou superior para o pipeline de dados (o ambiente do Airflow, em `airflow/`, exige Python 3.14; o `uv` o resolve sozinho). O `pyproject.toml` declara as dependências diretas e o `uv.lock` fixa a resolução reproduzível:
 
 ```bash
 uv sync
@@ -36,6 +38,21 @@ uv run olist-bronze --batch-id olist-mvp-2026-10-25
 O comando valida os oito CSVs definidos em `contracts/olist_mvp.yaml` e escreve um Parquet por fonte em `data/bronze/<batch_id>/`, junto com `ingestion_report.json`. Use o mesmo `batch_id` para substituir o diretório do lote anterior depois de montar a nova versão em uma pasta temporária; outro identificador cria outro lote. Assim não se acumulam cópias do mesmo lote, mas `_ingested_at` muda a cada execução. A rotina tenta restaurar o lote anterior se a promoção falhar, mas a troca envolve mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. CSVs ausentes, colunas obrigatórias ausentes, nulos em campos não anuláveis, tipos lógicos inválidos, chaves repetidas ou linhas malformadas bloqueiam a gravação. Colunas extras são mantidas. Valores de origem são gravados como texto; datas permanecem sem conversão/fuso. Geolocalização não é processada.
 
 Silver, Gold e DAG local do Airflow estão implementadas; a publicação remota continua pendente de decisão.
+
+## Verificação registrada (29–31/10/2026)
+
+`make pipeline` com o lote `olist-mvp-2026-10-25`: Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados e 2 testes unitários); `make test` com 29 testes aprovados; `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros. A Gold tem 99.441 pedidos (768 sem avaliação).
+
+## Testes
+
+| Camada | Comando | O que cobre |
+|---|---|---|
+| Contratos e Bronze (pytest) | `make test` | Todas as regras de validação (arquivo ausente, cabeçalho vazio ou duplicado, coluna obrigatória ausente, nulo proibido, tipo lógico inválido, chave simples e composta duplicada, linha malformada, nome reservado de metadado), `batch_id` inseguro, IDs como texto, nulos só onde permitido, metadados de lote, reexecução sem duplicar, preservação do último lote bom quando uma nova tentativa é bloqueada e rejeição de contratos inválidos. |
+| Definição da orquestração (pytest) | `make test` | DAG manual, sem backfill nem retries, uma execução por vez, `bronze` antes de `transform`, falha de etapa propaga, padrão de `batch_id` da DAG igual ao da Bronze, `make pipeline` sem prefixo que ignore falhas. A DAG é lida como código (AST), sem iniciar o Airflow. |
+| Lógica dos modelos (dbt unit tests) | `make transform` | Classificação das faixas de entrega por data de calendário, atraso em dias, média de várias avaliações por pedido, pedido sem avaliação preservado, e o resumo com peso igual por pedido (`models/unit_tests.yml`). Rodam antes dos modelos no `dbt build`. |
+| Dados reais (dbt data tests) | `make transform` | Chaves, nulos, domínio da nota, relacionamento avaliação→pedido, reconciliação de contagens entre Bronze, fato e resumo. |
+| Estilo e tipos | `make lint format typecheck` | Ruff e ty sobre `src`, `tests` (e `airflow/dags` no Ruff). |
+| DAG de ponta a ponta | `make airflow-test` | Executa a DAG completa em modo de teste. |
 
 ## Fora do MVP
 
@@ -105,6 +122,9 @@ A reexecução é idempotente no sentido operacional de não anexar uma cópia a
 | `pandas` | Lê cada arquivo para um DataFrame e preserva campos como strings antes da gravação. Não faz análise de entrega nesta etapa. |
 | `PyArrow` | Engine que `DataFrame.to_parquet` usa para serializar os dados no formato Parquet. |
 | `uv` | Resolve/instala dependências declaradas; `uv.lock` fixa a resolução para instalação reproduzível. Não executa a lógica de qualidade. |
+| `dbt-duckdb` (dbt Core + DuckDB) | Executa os modelos SQL Silver/Gold e os testes de dados sobre os Parquets, gravando em `data/warehouse.duckdb`. |
+| Apache Airflow 3.3.2 | Orquestra Bronze → dbt na DAG local, em ambiente `uv` separado (`airflow/`). |
+| `make` | Atalhos repetíveis para as etapas, usados também pela DAG. |
 | `pytest` | Executa os testes automatizados. |
 | `Ruff` | Formata e analisa problemas comuns de Python. |
 | `ty` | Verifica estaticamente compatibilidade de tipos. |
@@ -125,6 +145,8 @@ A transformação usa dbt com DuckDB local. O `dbt-duckdb` lê os Parquets diret
 - **Faixas:** `early` significa entrega antes da data estimada; `on_time`, no mesmo dia; `late`, depois da data estimada; `not_delivered`, sem data real de entrega; `delivered_missing_timestamp`, status `delivered` sem data real. `delivery_delay_days` é negativo para antecipação, zero no dia e positivo para atraso. A comparação usa datas de calendário.
 - **Nota:** várias avaliações do mesmo pedido são primeiro resumidas pela média. A Gold calcula a média dessas médias, dando o mesmo peso a cada pedido avaliado, e apresenta separadamente a quantidade de pedidos avaliados e de registros de avaliação.
 - **Qualidade:** `dbt build` executa modelos e testes de nulos, unicidade, chave composta de avaliação, domínio da nota, relacionamento avaliação→pedido, preservação de contagem de pedidos e reconciliação da Gold. Falha retorna código não-zero. Não há etapa de publicação remota, então os resultados ficam no banco local.
+
+Execute o dbt pelo `make transform` (ou `make pipeline`), não por `dbt build` direto: o Makefile passa a variável obrigatória `bronze_dir` com o caminho do lote, e sem ela as fontes não resolvem.
 
 Para executar tudo em sequência, com falha da Bronze impedindo a transformação:
 

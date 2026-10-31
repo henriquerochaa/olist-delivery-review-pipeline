@@ -1,0 +1,48 @@
+version: 2
+
+# Testes unitários: dados fictícios minúsculos entram nos modelos e a saída é
+# comparada com o resultado esperado. Cobrem a lógica de negócio, que os testes
+# de dados (que olham o dado real) não conseguem provar.
+unit_tests:
+  - name: fct_delivery_reviews_classifies_delivery_and_aggregates_reviews
+    description: >
+      Cada faixa de entrega é classificada pela data de calendário; várias
+      avaliações viram uma média por pedido; pedido sem avaliação é preservado.
+    model: fct_delivery_reviews
+    given:
+      - input: ref('stg_orders')
+        rows:
+          - {order_id: early, order_status: delivered, delivered_to_customer_at: "2017-01-08 10:00:00", estimated_delivery_at: "2017-01-10 00:00:00"}
+          - {order_id: on_time_same_day, order_status: delivered, delivered_to_customer_at: "2017-01-10 23:59:00", estimated_delivery_at: "2017-01-10 00:00:00"}
+          - {order_id: late, order_status: delivered, delivered_to_customer_at: "2017-01-13 08:00:00", estimated_delivery_at: "2017-01-10 00:00:00"}
+          - {order_id: shipped, order_status: shipped, delivered_to_customer_at: null, estimated_delivery_at: "2017-01-10 00:00:00"}
+          - {order_id: delivered_no_date, order_status: delivered, delivered_to_customer_at: null, estimated_delivery_at: "2017-01-10 00:00:00"}
+      - input: ref('stg_order_reviews')
+        rows:
+          - {order_id: late, review_id: r1, review_score: 1}
+          - {order_id: late, review_id: r2, review_score: 3}
+          - {order_id: early, review_id: r3, review_score: 5}
+    expect:
+      rows:
+        - {order_id: early, delivery_bucket: early, delivery_delay_days: -2, average_review_score: 5.0, review_count: 1}
+        - {order_id: on_time_same_day, delivery_bucket: on_time, delivery_delay_days: 0, average_review_score: null, review_count: 0}
+        - {order_id: late, delivery_bucket: late, delivery_delay_days: 3, average_review_score: 2.0, review_count: 2}
+        - {order_id: shipped, delivery_bucket: not_delivered, delivery_delay_days: null, average_review_score: null, review_count: 0}
+        - {order_id: delivered_no_date, delivery_bucket: delivered_missing_timestamp, delivery_delay_days: null, average_review_score: null, review_count: 0}
+
+  - name: mart_delivery_review_summary_weights_each_order_equally
+    description: >
+      O resumo conta pedidos e registros de avaliação separadamente e a nota
+      média é a média das médias por pedido (peso igual por pedido avaliado).
+    model: mart_delivery_review_summary
+    given:
+      - input: ref('fct_delivery_reviews')
+        rows:
+          - {order_id: a, delivery_bucket: late, delivery_delay_days: 2, average_review_score: 1.0, review_count: 3}
+          - {order_id: b, delivery_bucket: late, delivery_delay_days: 4, average_review_score: 5.0, review_count: 1}
+          - {order_id: c, delivery_bucket: late, delivery_delay_days: 6, average_review_score: null, review_count: 0}
+          - {order_id: d, delivery_bucket: early, delivery_delay_days: -3, average_review_score: 4.0, review_count: 1}
+    expect:
+      rows:
+        - {delivery_bucket: late, order_count: 3, reviewed_order_count: 2, review_record_count: 4, average_score_per_order: 3.0, average_delay_days: 4.0}
+        - {delivery_bucket: early, order_count: 1, reviewed_order_count: 1, review_record_count: 1, average_score_per_order: 4.0, average_delay_days: -3.0}
