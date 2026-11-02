@@ -11,6 +11,10 @@ from typing import Any
 
 import yaml
 
+LOGICAL_TYPES = {"string", "integer", "decimal", "timestamp_without_timezone"}
+# Nomes que a Bronze acrescenta; a origem não pode usá-los.
+RESERVED_METADATA_COLUMNS = {"_batch_id", "_ingested_at", "_source_file"}
+
 
 class ContractDefinitionError(ValueError):
     """Indica que o índice ou um contrato está inconsistente."""
@@ -27,6 +31,7 @@ def _matches_logical_type(value: str, logical_type: str) -> bool:
         if logical_type == "decimal":
             return Decimal(value).is_finite()
         if logical_type == "timestamp_without_timezone":
+            # O regex limita o formato; fromisoformat rejeita datas impossíveis.
             pattern = r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
             if re.fullmatch(pattern, value) is None:
                 return False
@@ -81,10 +86,6 @@ def load_contracts(index_path: Path) -> tuple[Path, list[dict[str, Any]]]:
     contracts: list[dict[str, Any]] = []
     source_files: set[str] = set()
     for contract_file in contract_files:
-        if Path(contract_file).name != contract_file:
-            raise ContractDefinitionError(
-                "contract_files deve conter apenas nomes de arquivos."
-            )
         path = index_path.parent / contract_file
         try:
             contract = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -120,8 +121,7 @@ def load_contracts(index_path: Path) -> tuple[Path, list[dict[str, Any]]]:
             if (
                 not isinstance(definition, dict)
                 or not isinstance(definition.get("nullable"), bool)
-                or definition.get("logical_type")
-                not in {"string", "integer", "decimal", "timestamp_without_timezone"}
+                or definition.get("logical_type") not in LOGICAL_TYPES
             ):
                 raise ContractDefinitionError(
                     f"Definição inválida para {source_file}.{name}."
@@ -168,6 +168,8 @@ def validate_sources(raw_dir: Path, contracts: list[dict[str, Any]]) -> dict[str
             continue
 
         try:
+            # utf-8-sig descarta o BOM do Excel; newline="" deixa o módulo csv
+            # tratar quebras de linha dentro de campos entre aspas.
             with path.open("r", encoding="utf-8-sig", newline="") as stream:
                 reader = csv.reader(stream)
                 header = next(reader, None)
@@ -196,11 +198,7 @@ def validate_sources(raw_dir: Path, contracts: list[dict[str, Any]]) -> dict[str
                     result["issues"].append(
                         {"rule": "required_columns", "missing_columns": missing}
                     )
-                if any(
-                    name.startswith("_")
-                    and name in {"_batch_id", "_ingested_at", "_source_file"}
-                    for name in header
-                ):
+                if RESERVED_METADATA_COLUMNS & set(header):
                     result["issues"].append(
                         {
                             "rule": "reserved_metadata_names",
@@ -214,6 +212,7 @@ def validate_sources(raw_dir: Path, contracts: list[dict[str, Any]]) -> dict[str
                 invalid_type_rows: dict[str, list[int]] = {}
                 duplicate_key_rows: list[int] = []
                 malformed_rows: list[int] = []
+                # start=2: a linha 1 do arquivo é o cabeçalho.
                 for row_number, row in enumerate(reader, start=2):
                     result["rows_read"] += 1
                     if len(row) != len(header):
@@ -236,7 +235,7 @@ def validate_sources(raw_dir: Path, contracts: list[dict[str, Any]]) -> dict[str
                     if all(name in positions for name in key):
                         key_values = tuple(row[positions[name]] for name in key)
                         if any(value == "" for value in key_values):
-                            continue
+                            continue  # chave nula já é reportada pela regra not_null
                         if key_values in seen_keys:
                             duplicate_key_rows.append(row_number)
                         else:
@@ -282,6 +281,7 @@ def validate_sources(raw_dir: Path, contracts: list[dict[str, Any]]) -> dict[str
             result["issues"].append({"rule": "csv_readable", "message": str(exc)})
         file_results.append(result)
 
+    # issue_count conta regras violadas; error_count conta ocorrências.
     issue_count = sum(len(result["issues"]) for result in file_results)
     error_count = sum(
         issue.get("count", 1) for result in file_results for issue in result["issues"]

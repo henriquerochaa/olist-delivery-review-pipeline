@@ -10,6 +10,8 @@ import pendulum
 from airflow.sdk import Param, dag, get_current_context, task
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Cada tarefa chama um alvo do Makefile: a regra de cada etapa fica definida em
+# um só lugar e o Airflow apenas a orquestra.
 
 
 @dag(
@@ -21,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
     max_active_runs=1,
     max_active_tasks=1,
     dagrun_timeout=timedelta(hours=3),
+    # retries=0: falha de contrato ou de teste é determinística; repetir não ajuda.
     default_args={"retries": 0, "execution_timeout": timedelta(hours=2)},
     params={
         "batch_id": Param(

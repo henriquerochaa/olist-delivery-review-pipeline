@@ -27,6 +27,7 @@ class IngestionBlocked(RuntimeError):
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Grava num arquivo temporário e renomeia: o relatório nunca fica pela metade.
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -42,6 +43,7 @@ def ingest_batch(
     ingested_at: str | None = None,
 ) -> dict[str, Any]:
     """Valida os oito CSVs e substitui o diretório do mesmo lote."""
+    # batch_id vira nome de pasta: o padrão barra "..", "/" e espaços.
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", batch_id):
         raise ValueError(
             "batch_id deve ter 1–100 caracteres: letras, números, ponto, hífen ou sublinhado."
@@ -78,6 +80,8 @@ def ingest_batch(
     try:
         for contract, file_result in zip(contracts, validation["files"], strict=True):
             source_file = contract["source_file"]
+            # Tudo como texto e sem inferência de nulos: IDs e CEPs mantêm os zeros
+            # à esquerda, e a tipagem fica para a Silver.
             frame = pd.read_csv(
                 raw_dir / source_file,
                 dtype="string",
@@ -113,6 +117,8 @@ def ingest_batch(
         report["error_count"] = 0
         _write_json(stage_dir / "ingestion_report.json", report)
 
+        # Troca em duas renomeações: o lote antigo vira backup e só é apagado
+        # depois que o novo assume o lugar, para poder voltar atrás se falhar.
         if final_dir.exists():
             final_dir.replace(backup_dir)
         try:

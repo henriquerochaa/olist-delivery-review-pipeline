@@ -1,3 +1,5 @@
+-- Datas chegam como texto. nullif transforma "" em NULL e try_cast devolve NULL
+-- (em vez de erro) quando o valor não é uma data; os testes cobrem os casos críticos.
 select
     order_id,
     order_status,

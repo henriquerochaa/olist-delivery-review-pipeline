@@ -1,3 +1,5 @@
+-- Grão: uma linha por pedido. As avaliações são agregadas ANTES do join, porque
+-- um pedido pode ter várias; juntar antes multiplicaria as linhas do pedido.
 with reviews_by_order as (
     select
         order_id,
@@ -11,6 +13,7 @@ with reviews_by_order as (
         reviews.average_review_score,
         coalesce(reviews.review_count, 0) as review_count
     from {{ ref('stg_orders') }} as orders
+    -- left join: pedido sem avaliação continua na tabela
     left join reviews_by_order as reviews using (order_id)
 )
 select
@@ -18,6 +21,8 @@ select
     order_status,
     delivered_to_customer_at,
     estimated_delivery_at,
+    -- O case avalia de cima para baixo: os casos sem data real vêm primeiro.
+    -- Comparamos datas de calendário (não horas), como a data estimada da Olist.
     case
         when delivered_to_customer_at is null and order_status = 'delivered'
             then 'delivered_missing_timestamp'

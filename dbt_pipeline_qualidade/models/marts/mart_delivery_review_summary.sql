@@ -1,3 +1,5 @@
+-- avg(average_review_score) é a média das médias por pedido: cada pedido pesa
+-- igual, mesmo com várias avaliações. NULLs (pedidos sem nota) ficam de fora.
 select
     delivery_bucket,
     count(*) as order_count,
