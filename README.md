@@ -4,17 +4,18 @@ Pipeline batch que roda localmente e responde a uma pergunta: como a entrega se 
 
 ## Resultado
 
-Nota média por pedido avaliado, segundo a entrega em relação à data estimada (99.441 pedidos):
+Nota média por pedido, segundo a entrega em relação à data estimada. A tabela cobre os 99.441 pedidos, mas a nota é calculada só sobre os 98.673 que têm avaliação:
 
-| Entrega | Pedidos | Nota média | Atraso médio (dias) |
-|---|---:|---:|---:|
-| Antes do prazo (`early`) | 88.649 | 4,29 | −13,7 |
-| No dia (`on_time`) | 1.292 | 4,04 | 0 |
-| Atrasada (`late`) | 6.535 | 2,27 | +10,6 |
-| Não entregue (`not_delivered`) | 2.957 | 1,75 | n/d |
-| `delivered` sem data real (`delivered_missing_timestamp`) | 8 | 4,50 | n/d |
+| Entrega | Pedidos | Com avaliação | Sem avaliação | Nota média | Atraso médio (dias) |
+|---|---:|---:|---:|---:|---:|
+| Antes do prazo (`early`) | 88.649 | 88.168 | 481 | 4,29 | −13,7 |
+| No dia (`on_time`) | 1.292 | 1.280 | 12 | 4,04 | 0 |
+| Atrasada (`late`) | 6.535 | 6.382 | 153 | 2,27 | +10,6 |
+| Não entregue (`not_delivered`) | 2.957 | 2.835 | 122 | 1,75 | n/d |
+| `delivered` sem data real (`delivered_missing_timestamp`) | 8 | 8 | 0 | 4,50 | n/d |
+| **Total** | **99.441** | **98.673** | **768** | | |
 
-Os pedidos atrasados têm nota média de 2,27, contra 4,29 nos entregues antes do prazo. Esses números descrevem um snapshot histórico e não provam causalidade: pedidos atrasados podem diferir dos demais em outros aspectos. Cada pedido pesa o mesmo na média, e quando há várias avaliações do mesmo pedido entra a média delas. Os 768 pedidos sem avaliação e os 2.965 sem data real de entrega foram mantidos, sem descarte.
+Os pedidos atrasados têm nota média de 2,27, contra 4,29 nos entregues antes do prazo. Esses números descrevem um snapshot histórico e não provam causalidade: pedidos atrasados podem diferir dos demais em outros aspectos. Cada pedido pesa o mesmo na média, e quando há várias avaliações do mesmo pedido entra a média delas. Os 768 pedidos sem avaliação (coluna "Sem avaliação") e os 2.965 sem data real de entrega (as duas últimas linhas) foram mantidos, sem descarte; os sem avaliação só ficam de fora do cálculo da nota média.
 
 ## Arquitetura
 
