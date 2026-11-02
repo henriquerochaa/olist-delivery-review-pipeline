@@ -5,12 +5,14 @@ requires-python = ">=3.11"
 dependencies = [
     "dbt-duckdb>=1.11.1",
     "pandas>=3.1.0",
+    "psycopg[binary]>=3.3.6",
     "pyarrow>=26.0.0",
     "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
 olist-bronze = "projeto1_pipeline_qualidade_dados.bronze:main"
+olist-publish = "projeto1_pipeline_qualidade_dados.publish:main"
 
 [build-system]
 requires = ["uv_build>=0.8.0,<0.9.0"]

@@ -3,13 +3,16 @@ BRONZE_DIR ?= data/bronze/$(BATCH_ID)
 DBT_PROJECT := dbt_pipeline_qualidade
 DBT_VARS := {"bronze_dir": "$(abspath $(BRONZE_DIR))"}
 
-.PHONY: bronze transform pipeline airflow airflow-test test lint format typecheck
+.PHONY: bronze transform publish pipeline airflow airflow-test test lint format typecheck
 
 bronze:
 	uv run olist-bronze --batch-id "$(BATCH_ID)"
 
 transform:
 	uv run dbt build --project-dir "$(DBT_PROJECT)" --profiles-dir "$(DBT_PROJECT)" --vars '$(DBT_VARS)'
+
+publish:
+	uv run olist-publish
 
 pipeline:
 	uv run olist-bronze --batch-id "$(BATCH_ID)"
