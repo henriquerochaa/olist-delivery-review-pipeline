@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 @dag(
     dag_id="olist_delivery_review_pipeline",
-    description="Ingestão Bronze seguida da transformação e qualidade dbt.",
+    description="Bronze, transformação com testes dbt e publicação da Gold.",
     start_date=pendulum.datetime(2026, 10, 29, tz="UTC"),
     schedule=None,
     catchup=False,
@@ -51,7 +51,12 @@ def olist_delivery_review_pipeline():
             check=True,
         )
 
-    ingest_bronze() >> build_and_test_models()
+    @task
+    def publish_gold() -> None:
+        # Lê NEON_DATABASE_URL do ambiente do Airflow; só roda se o dbt passou.
+        subprocess.run(["make", "publish"], cwd=PROJECT_ROOT, check=True)
+
+    ingest_bronze() >> build_and_test_models() >> publish_gold()
 
 
 olist_delivery_review_pipeline()

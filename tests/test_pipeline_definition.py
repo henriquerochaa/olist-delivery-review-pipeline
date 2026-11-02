@@ -66,7 +66,9 @@ def test_dag_is_manual_single_run_without_backfill_or_retries(
     assert ast.literal_eval(retries) == 0
 
 
-def test_dag_runs_bronze_then_transform_through_make(dag_tree: ast.Module) -> None:
+def test_dag_runs_bronze_transform_then_publish_through_make(
+    dag_tree: ast.Module,
+) -> None:
     runs = _calls(dag_tree, "run")
     commands = []
     for call in runs:
@@ -74,7 +76,7 @@ def test_dag_runs_bronze_then_transform_through_make(dag_tree: ast.Module) -> No
         assert isinstance(arguments, ast.List)
         commands.append(ast.literal_eval(arguments.elts[1]))
 
-    assert commands == ["bronze", "transform"]
+    assert commands == ["bronze", "transform", "publish"]
     assert all(ast.literal_eval(_keywords(call)["check"]) is True for call in runs), (
         "uma falha de etapa deve falhar a task"
     )
@@ -83,7 +85,10 @@ def test_dag_runs_bronze_then_transform_through_make(dag_tree: ast.Module) -> No
         for node in ast.walk(dag_tree)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.RShift)
     )
-    assert ast.unparse(dependency) == "ingest_bronze() >> build_and_test_models()"
+    assert (
+        ast.unparse(dependency)
+        == "ingest_bronze() >> build_and_test_models() >> publish_gold()"
+    )
 
 
 def test_dag_batch_id_pattern_matches_bronze_validation(dag_tree: ast.Module) -> None:
@@ -103,7 +108,7 @@ def test_dag_batch_id_pattern_matches_bronze_validation(dag_tree: ast.Module) ->
 def test_make_targets_used_by_dag_exist_and_pipeline_stops_on_failure() -> None:
     makefile = MAKEFILE.read_text(encoding="utf-8")
 
-    for target in ("bronze", "transform", "pipeline"):
+    for target in ("bronze", "transform", "publish", "pipeline"):
         assert re.search(rf"^{target}:", makefile, re.MULTILINE)
     pipeline = re.search(r"^pipeline:\n((?:\t.*\n)+)", makefile, re.MULTILINE)
     assert pipeline is not None
