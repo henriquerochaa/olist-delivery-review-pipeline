@@ -97,7 +97,7 @@ Use o host com `-pooler` (o que o console oferece por padrão); é o que foi tes
 | Dados reais (dbt data tests) | `make transform` | Chaves únicas, nulos, nota entre 1 e 5, avaliação→pedido, reconciliação de contagens entre Bronze, fato e resumo. |
 | Ponta a ponta | `make airflow-test` | Executa a DAG completa, inclusive a publicação (exige `NEON_DATABASE_URL`). |
 
-Última verificação registrada (02/11/2026): `pytest` com 43 testes aprovados (os 5 mais recentes, do bloqueio de Gold desatualizada, ainda não passaram por uma publicação real no Neon nem pela DAG); `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros; Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados, 2 testes unitários); `make airflow-test` com as três tarefas (Bronze, dbt e publicação) em `success`, publicando 99.441 linhas na fato e 5 no resumo no Neon.
+Última verificação registrada (02/11/2026): `pytest` com 43 testes aprovados (5 deles, do bloqueio de Gold desatualizada, também foram exercitados com uma publicação real no Neon e pela DAG); `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros; Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados, 2 testes unitários); `make airflow-test` com as três tarefas (Bronze, dbt e publicação) em `success`, publicando 99.441 linhas na fato e 5 no resumo no Neon.
 
 ## Limitações
 
