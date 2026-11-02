@@ -59,7 +59,7 @@ Os alvos do `Makefile`:
 |---|---|
 | `make bronze` | Valida os CSVs e grava a Bronze em `data/bronze/<batch_id>/`, com `ingestion_report.json`. |
 | `make transform` | Roda `dbt build` sobre uma Bronze existente e grava `data/warehouse.duckdb`. |
-| `make publish` | Publica a Gold do DuckDB no Postgres indicado por `NEON_DATABASE_URL`. |
+| `make publish` | Publica a Gold do DuckDB no Postgres indicado por `NEON_DATABASE_URL`. Exige um `dbt build` anterior, sem falhas, em `dbt_pipeline_qualidade/target/run_results.json` (`--dbt-results` muda o caminho). |
 | `make pipeline` | Bronze e depois dbt; a falha da primeira etapa impede a segunda. Não publica. |
 | `make test` / `lint` / `format` / `typecheck` | pytest, Ruff (check e format) e ty. |
 | `make airflow` | Sobe o Airflow em modo `standalone` (desenvolvimento local, não produção). |
@@ -84,7 +84,7 @@ export NEON_DATABASE_URL='postgresql://pipeline_publisher:<senha>@<host>/<banco>
 make publish
 ```
 
-Use o host com `-pooler` (o que o console oferece por padrão); é o que foi testado, e a carga é uma única transação curta, sem estado de sessão. Use uma senha só com letras e números, ou codifique caracteres especiais na URL. Os erros do driver nunca são impressos, para não vazar credenciais. Só `order_id`, status, datas e médias de nota são publicados; não há dados de clientes.
+Antes de carregar, a publicação confere o `run_results.json` do último `dbt build` e recusa Gold com item reprovado. O horário desse build fica em `gold._publish_log` (criada na primeira publicação), e uma Gold mais antiga que a última publicada é recusada; republicar a mesma é permitido. Use o host com `-pooler` (o que o console oferece por padrão); é o que foi testado, e a carga é uma única transação curta, sem estado de sessão. Use uma senha só com letras e números, ou codifique caracteres especiais na URL. Os erros do driver nunca são impressos, para não vazar credenciais. Só `order_id`, status, datas e médias de nota são publicados; não há dados de clientes.
 
 ## Testes e verificação
 
@@ -106,7 +106,7 @@ Use o host com `-pooler` (o que o console oferece por padrão); é o que foi tes
 - A Bronze lê cada CSV inteiro em memória com pandas; para arquivos muito maiores seria preciso ler em blocos.
 - A troca do diretório do lote usa mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. Não há coordenação para duas execuções simultâneas do mesmo `batch_id`.
 - Os modelos `stg_*` não têm teste unitário próprio; a regra de negócio está na Gold.
-- A orquestração `standalone` com SQLite serve ao desenvolvimento local. Não há CI. A publicação é um full refresh: substitui as tabelas do schema `gold` a cada execução, sem histórico de versões.
+- A orquestração `standalone` com SQLite serve ao desenvolvimento local. Não há CI. A publicação é um full refresh: substitui as tabelas do schema `gold` a cada execução, sem histórico de versões. Ela também não usa área de preparo com promoção: a transação única garante tudo ou nada, mas as tabelas são substituídas no próprio schema `gold`. O tempo medido da carga (três execuções, de 5 a 9 s) é uma ordem de grandeza, sem controle de rede.
 
 ## Estrutura do repositório
 
