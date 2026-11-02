@@ -29,7 +29,7 @@ CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold → Postgre
 | Bronze | Valida os CSVs contra os contratos e grava um Parquet por fonte, com os campos de origem como texto e os metadados `_batch_id`, `_ingested_at` e `_source_file`. Falha de contrato bloqueia a gravação e as etapas seguintes. |
 | Silver (views dbt) | `stg_orders` e `stg_order_reviews`: tipos convertidos, só as colunas necessárias. |
 | Gold (tabelas dbt) | `fct_delivery_reviews` (uma linha por pedido, avaliações agregadas antes do join) e `mart_delivery_review_summary` (resumo por faixa de entrega). |
-| Publicação | `publish_gold` copia as duas tabelas Gold para o schema `gold` de um Postgres no Neon, numa única transação (full refresh) com contagens reconciliadas; só roda depois dos testes dbt. |
+| Publicação | `publish_gold` copia as duas tabelas Gold para o schema `gold` de um Postgres no Neon, numa única transação (full refresh) com contagens reconciliadas. Só roda depois dos testes dbt, recusa um `dbt build` com item reprovado e recusa uma Gold mais antiga que a última publicada. |
 | Orquestração | DAG do Airflow com `ingest_bronze` → `build_and_test_models` → `publish_gold`, sem agendamento (o dataset é histórico). |
 
 ### Decisões de projeto
@@ -69,7 +69,7 @@ Execute o dbt por `make transform` ou `make pipeline`, não por `dbt build` dire
 
 ## Publicação no Postgres (Neon)
 
-A publicação é opcional e usa uma role restrita, não a do dono do banco. No SQL Editor do Postgres (com uma role administrativa):
+A publicação é opcional e usa uma role restrita, não a do dono do banco. A role é criada por SQL, e não pelo botão "Add role" do console, porque o console coloca a role nova no grupo `neon_superuser`, de poderes amplos; o pipeline só precisa escrever no schema `gold`. No SQL Editor do Postgres (com uma role administrativa):
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS gold;
@@ -84,20 +84,20 @@ export NEON_DATABASE_URL='postgresql://pipeline_publisher:<senha>@<host>/<banco>
 make publish
 ```
 
-Use uma senha só com letras e números, ou codifique caracteres especiais na URL. Os erros do driver nunca são impressos, para não vazar credenciais. Só `order_id`, status, datas e médias de nota são publicados; não há dados de clientes.
+Use o host com `-pooler` (o que o console oferece por padrão); é o que foi testado, e a carga é uma única transação curta, sem estado de sessão. Use uma senha só com letras e números, ou codifique caracteres especiais na URL. Os erros do driver nunca são impressos, para não vazar credenciais. Só `order_id`, status, datas e médias de nota são publicados; não há dados de clientes.
 
 ## Testes e verificação
 
 | Camada | Comando | O que cobre |
 |---|---|---|
 | Contratos e Bronze (pytest) | `make test` | Arquivo ausente, cabeçalho vazio ou duplicado, coluna obrigatória ausente, nulo proibido, tipo lógico inválido, chave simples e composta duplicada, linha malformada, `batch_id` inseguro, reexecução sem duplicar e preservação do último lote bom quando uma nova tentativa é bloqueada. |
-| Publicação (pytest) | `make test` | Validação do schema, bloqueio com origem vazia ou inconsistente, variável ausente, reconciliação de contagens com rollback e erro sem vazar a senha. Usa DuckDB temporário e um destino falso, sem Postgres real. |
+| Publicação (pytest) | `make test` | Validação do schema, bloqueio com origem vazia ou inconsistente, variável ausente, reconciliação de contagens com rollback, bloqueio de `dbt build` reprovado ou ausente, recusa de Gold mais antiga que a última publicada e erro sem vazar a senha. Usa DuckDB temporário e um destino falso, sem Postgres real. |
 | Definição da DAG (pytest) | `make test` | DAG manual, sem backfill nem retries, uma execução por vez, Bronze → transformação → publicação, falha propagada. A DAG é lida como código (AST), sem iniciar o Airflow. |
 | Lógica dos modelos (dbt unit tests) | `make transform` | Faixas de entrega, atraso em dias, média de várias avaliações por pedido, pedido sem avaliação preservado e resumo com peso igual por pedido. |
 | Dados reais (dbt data tests) | `make transform` | Chaves únicas, nulos, nota entre 1 e 5, avaliação→pedido, reconciliação de contagens entre Bronze, fato e resumo. |
 | Ponta a ponta | `make airflow-test` | Executa a DAG completa, inclusive a publicação (exige `NEON_DATABASE_URL`). |
 
-Última verificação registrada (01/11/2026): `pytest` com 38 testes aprovados; `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros; Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados, 2 testes unitários); `make airflow-test` com as três tarefas (Bronze, dbt e publicação) em `success`, publicando 99.441 linhas na fato e 5 no resumo no Neon.
+Última verificação registrada (02/11/2026): `pytest` com 43 testes aprovados (os 5 mais recentes, do bloqueio de Gold desatualizada, ainda não passaram por uma publicação real no Neon nem pela DAG); `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros; Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados, 2 testes unitários); `make airflow-test` com as três tarefas (Bronze, dbt e publicação) em `success`, publicando 99.441 linhas na fato e 5 no resumo no Neon.
 
 ## Limitações
 
