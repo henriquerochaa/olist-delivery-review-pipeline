@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -33,6 +35,19 @@ def _make_duckdb(path: Path, *, summary_orders: int = 2) -> None:
     connection.close()
 
 
+BUILT_AT = datetime(2026, 11, 2, 14, 0, tzinfo=UTC)
+
+
+def _make_dbt_results(
+    path: Path, *, statuses: tuple[str, ...] = ("pass", "success")
+) -> None:
+    results = [{"unique_id": f"node.{i}", "status": s} for i, s in enumerate(statuses)]
+    meta = {"generated_at": "2026-11-02T14:00:00.000000Z"}
+    path.write_text(
+        json.dumps({"metadata": meta, "results": results}), encoding="utf-8"
+    )
+
+
 class FakeCopy:
     def __init__(self, sink: list[tuple[Any, ...]]) -> None:
         self.sink = sink
@@ -42,10 +57,11 @@ class FakeCopy:
 
 
 class FakeCursor:
-    def __init__(self, store: dict[str, int], break_count: bool) -> None:
+    def __init__(self, store: dict[str, Any], break_count: bool) -> None:
         self.store = store
         self.break_count = break_count
         self.current = ""
+        self.pending_max = False
         self.rows: list[tuple[Any, ...]] = []
 
     def __enter__(self) -> Self:
@@ -54,8 +70,11 @@ class FakeCursor:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def execute(self, query: Any) -> None:
+    def execute(self, query: Any, params: tuple[Any, ...] | None = None) -> None:
         text = query.as_string() if hasattr(query, "as_string") else str(query)
+        self.pending_max = text.startswith("select max(gold_built_at)")
+        if text.startswith("insert into") and params:
+            self.store["logged"] = params[0]
         if text.startswith("select count"):
             return
         self.current = text
@@ -66,13 +85,17 @@ class FakeCursor:
         yield FakeCopy(sink)
         self.store["last"] = len(sink)
 
-    def fetchone(self) -> tuple[int]:
+    def fetchone(self) -> tuple[Any]:
+        if self.pending_max:
+            return (self.store.get("last_published"),)
         return (self.store["last"] + (1 if self.break_count else 0),)
 
 
 class FakeConnection:
-    def __init__(self, *, break_count: bool = False) -> None:
-        self.store: dict[str, int] = {}
+    def __init__(
+        self, *, break_count: bool = False, last_published: datetime | None = None
+    ) -> None:
+        self.store: dict[str, Any] = {"last_published": last_published}
         self.break_count = break_count
         self.rolled_back = False
 
@@ -128,7 +151,7 @@ def test_load_tables_reports_counts(tmp_path: Path) -> None:
     _make_duckdb(db)
     rows = publish.read_gold_rows(db)
     connection = FakeConnection()
-    counts = publish.load_tables(connection, "gold", rows)  # ty: ignore[invalid-argument-type]
+    counts = publish.load_tables(connection, "gold", rows, BUILT_AT)  # ty: ignore[invalid-argument-type]
     assert counts == {"fct_delivery_reviews": 2, "mart_delivery_review_summary": 1}
     assert not connection.rolled_back
 
@@ -139,7 +162,7 @@ def test_count_mismatch_rolls_back(tmp_path: Path) -> None:
     rows = publish.read_gold_rows(db)
     connection = FakeConnection(break_count=True)
     with pytest.raises(PublishError, match="destino"):
-        publish.load_tables(connection, "gold", rows)  # ty: ignore[invalid-argument-type]
+        publish.load_tables(connection, "gold", rows, BUILT_AT)  # ty: ignore[invalid-argument-type]
     assert connection.rolled_back
 
 
@@ -159,6 +182,51 @@ def test_main_never_prints_driver_message(
     db = tmp_path / "w.duckdb"
     _make_duckdb(db)
     # Senha com % inválido: o driver repete o trecho na mensagem de erro.
+    results = tmp_path / "run_results.json"
+    _make_dbt_results(results)
     monkeypatch.setenv(publish.DATABASE_URL_ENV, "postgresql://u:abc%*segredo@h/db")
-    assert publish.main(["--duckdb", str(db)]) == 1
+    assert publish.main(["--duckdb", str(db), "--dbt-results", str(results)]) == 1
     assert "segredo" not in capsys.readouterr().err
+
+
+def test_load_tables_logs_build_time(tmp_path: Path) -> None:
+    db = tmp_path / "w.duckdb"
+    _make_duckdb(db)
+    connection = FakeConnection()
+    publish.load_tables(connection, "gold", publish.read_gold_rows(db), BUILT_AT)  # ty: ignore[invalid-argument-type]
+    assert connection.store["logged"] == BUILT_AT
+
+
+def test_older_gold_than_last_published_is_refused(tmp_path: Path) -> None:
+    db = tmp_path / "w.duckdb"
+    _make_duckdb(db)
+    newer = datetime(2026, 11, 3, tzinfo=UTC)
+    connection = FakeConnection(last_published=newer)
+    with pytest.raises(PublishError, match="mais antiga"):
+        publish.load_tables(connection, "gold", publish.read_gold_rows(db), BUILT_AT)  # ty: ignore[invalid-argument-type]
+    assert connection.rolled_back
+    assert "logged" not in connection.store
+
+
+def test_republishing_same_gold_is_allowed(tmp_path: Path) -> None:
+    db = tmp_path / "w.duckdb"
+    _make_duckdb(db)
+    connection = FakeConnection(last_published=BUILT_AT)
+    publish.load_tables(connection, "gold", publish.read_gold_rows(db), BUILT_AT)  # ty: ignore[invalid-argument-type]
+    assert not connection.rolled_back
+
+
+def test_failed_dbt_item_blocks_before_connecting(tmp_path: Path) -> None:
+    db = tmp_path / "w.duckdb"
+    _make_duckdb(db)
+    results = tmp_path / "run_results.json"
+    _make_dbt_results(results, statuses=("pass", "fail"))
+    with pytest.raises(PublishError, match="sem sucesso"):
+        publish.publish_gold(db, "postgresql://invalido", "gold", results)
+
+
+def test_missing_dbt_results_blocks_before_connecting(tmp_path: Path) -> None:
+    db = tmp_path / "w.duckdb"
+    _make_duckdb(db)
+    with pytest.raises(PublishError, match="Resultado do dbt"):
+        publish.publish_gold(db, "postgresql://invalido", "gold", tmp_path / "nao.json")

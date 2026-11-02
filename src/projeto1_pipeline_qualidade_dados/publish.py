@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, LiteralString
 
@@ -22,6 +23,9 @@ from psycopg import sql
 DATABASE_URL_ENV = "NEON_DATABASE_URL"
 DEFAULT_DUCKDB_PATH = "data/warehouse.duckdb"
 DEFAULT_SCHEMA = "gold"
+DEFAULT_DBT_RESULTS = "dbt_pipeline_qualidade/target/run_results.json"
+PUBLISH_LOG_TABLE = "_publish_log"
+PASSING_STATUSES = {"pass", "success"}
 _IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 # Tabela Gold -> (coluna, tipo Postgres). A ordem define a ordem do COPY.
@@ -86,6 +90,25 @@ def check_source_consistency(rows: dict[str, list[tuple[Any, ...]]]) -> None:
         )
 
 
+def read_gold_build_time(results_path: Path) -> datetime:
+    """Devolve o horário do último `dbt build`, se todos os itens passaram.
+
+    O dbt cria cada tabela antes de rodar os testes dela. Sem esta checagem,
+    um `make publish` isolado copiaria uma Gold reprovada que ficou no DuckDB.
+    """
+    if not results_path.exists():
+        raise PublishError(f"Resultado do dbt não encontrado: {results_path}")
+    data = json.loads(results_path.read_text(encoding="utf-8"))
+    failed = [
+        r["unique_id"] for r in data["results"] if r["status"] not in PASSING_STATUSES
+    ]
+    if failed:
+        raise PublishError(
+            f"O último dbt build teve {len(failed)} item(ns) sem sucesso."
+        )
+    return datetime.fromisoformat(data["metadata"]["generated_at"])
+
+
 def _create_table_sql(schema: str, table: str) -> sql.Composed:
     columns = sql.SQL(", ").join(
         sql.SQL("{} {}").format(sql.Identifier(name), sql.SQL(pg_type))
@@ -107,10 +130,28 @@ def load_tables(
     connection: psycopg.Connection,
     schema: str,
     rows: dict[str, list[tuple[Any, ...]]],
+    gold_built_at: datetime,
 ) -> dict[str, int]:
-    """Substitui as tabelas numa transação e reconcilia contagens antes do commit."""
+    """Substitui as tabelas numa transação e reconcilia contagens antes do commit.
+
+    Recusa uma Gold construída antes da última já publicada.
+    """
     counts: dict[str, int] = {}
+    log = sql.Identifier(schema), sql.Identifier(PUBLISH_LOG_TABLE)
     with connection.transaction(), connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                "create table if not exists {}.{} (gold_built_at timestamptz not null, "
+                "published_at timestamptz not null default now())"
+            ).format(*log)
+        )
+        cursor.execute(sql.SQL("select max(gold_built_at) from {}.{}").format(*log))
+        last = cursor.fetchone()
+        if last and last[0] is not None and last[0] > gold_built_at:
+            raise PublishError(
+                f"Gold de {gold_built_at:%Y-%m-%d %H:%M} é mais antiga que a última "
+                f"publicada ({last[0]:%Y-%m-%d %H:%M}); rode o pipeline de novo."
+            )
         for table, table_rows in rows.items():
             cursor.execute(_create_table_sql(schema, table))
             cursor.execute(
@@ -134,6 +175,10 @@ def load_tables(
                     f"{table}: origem {len(table_rows)} linhas, destino {loaded}."
                 )
             counts[table] = loaded
+        cursor.execute(
+            sql.SQL("insert into {}.{} (gold_built_at) values (%s)").format(*log),
+            (gold_built_at,),
+        )
     return counts
 
 
@@ -141,6 +186,7 @@ def publish_gold(
     duckdb_path: Path,
     database_url: str,
     schema: str = DEFAULT_SCHEMA,
+    dbt_results_path: Path = Path(DEFAULT_DBT_RESULTS),
 ) -> dict[str, int]:
     """Valida a origem, carrega o destino e devolve as contagens publicadas."""
     schema = validate_identifier(schema)
@@ -148,20 +194,23 @@ def publish_gold(
         raise PublishError(f"Defina a variável de ambiente {DATABASE_URL_ENV}.")
     rows = read_gold_rows(duckdb_path)
     check_source_consistency(rows)
+    gold_built_at = read_gold_build_time(dbt_results_path)
     with psycopg.connect(database_url, connect_timeout=15) as connection:
-        return load_tables(connection, schema, rows)
+        return load_tables(connection, schema, rows, gold_built_at)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Publica a Gold no Postgres (Neon).")
     parser.add_argument("--duckdb", default=DEFAULT_DUCKDB_PATH)
     parser.add_argument("--schema", default=DEFAULT_SCHEMA)
+    parser.add_argument("--dbt-results", default=DEFAULT_DBT_RESULTS)
     args = parser.parse_args(argv)
     try:
         counts = publish_gold(
             Path(args.duckdb),
             os.environ.get(DATABASE_URL_ENV, ""),
             args.schema,
+            Path(args.dbt_results),
         )
     except PublishError as error:
         print(f"Publicação falhou: {error}", file=sys.stderr)
