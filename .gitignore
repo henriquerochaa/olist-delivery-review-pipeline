@@ -70,3 +70,7 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 *.db
+
+# Ferramentas locais de agentes (skills instaladas pela CLI do Neon)
+.claude/
+skills-lock.json
