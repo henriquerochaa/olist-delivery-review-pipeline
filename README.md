@@ -1,180 +1,124 @@
-# Projeto 1 — Pipeline de qualidade de dados
+# Olist Delivery Review Pipeline
 
-Pipeline batch reproduzível para analisar a relação entre prazo de entrega e avaliação de clientes no Brazilian E-Commerce Public Dataset by Olist.
+Pipeline batch que roda localmente e responde a uma pergunta: como a entrega se relaciona com a nota das avaliações dos clientes? Os dados vêm do [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce). O processamento usa Python/Pandas, dbt, DuckDB e Airflow, e cada etapa é protegida por contratos de dados ou por testes automatizados.
 
-## Sobre este repositório
+## Resultado
 
-Este README é a documentação pública de instalação, arquitetura e execução. O repositório contém o pipeline local e os contratos das fontes; dados brutos, saídas de execução, instruções internas para agentes e notas pessoais ficam fora do versionamento.
+Nota média por pedido avaliado, segundo a entrega em relação à data estimada (99.441 pedidos):
 
-## Pergunta analítica
+| Entrega | Pedidos | Nota média | Atraso médio (dias) |
+|---|---:|---:|---:|
+| Antes do prazo (`early`) | 88.649 | 4,29 | −13,7 |
+| No dia (`on_time`) | 1.292 | 4,04 | 0 |
+| Atrasada (`late`) | 6.535 | 2,27 | +10,6 |
+| Não entregue (`not_delivered`) | 2.957 | 1,75 | n/d |
+| `delivered` sem data real (`delivered_missing_timestamp`) | 8 | 4,50 | n/d |
 
-Como o desempenho da entrega — comparando datas estimadas e reais — se relaciona às notas de avaliação? A análise deve preservar os casos sem entrega ou sem avaliação e controlar a granularidade para não duplicar métricas.
+Os pedidos atrasados têm nota média de 2,27, contra 4,29 nos entregues antes do prazo. Esses números descrevem um snapshot histórico e não provam causalidade: pedidos atrasados podem diferir dos demais em outros aspectos. Cada pedido pesa o mesmo na média, e quando há várias avaliações do mesmo pedido entra a média delas. Os 768 pedidos sem avaliação e os 2.965 sem data real de entrega foram mantidos, sem descarte.
 
 ## Arquitetura
 
 ```text
-CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold
-        └──────────── orquestrado por Airflow (DAG local, manual) ────────────┘
-                                              publicação remota: não decidida
+CSV original → Bronze (Parquet) → Silver (dbt + DuckDB) → Gold → Postgres (Neon)
+        └─────────── orquestrado por Airflow (DAG local, manual) ───────────┘
 ```
 
-O MVP é local e batch sob demanda, orquestrado pelo Airflow. Bronze, Silver, Gold e a DAG local estão implementadas; a publicação remota não existe e continua fora até a escolha de destino.
+| Camada | O que faz |
+|---|---|
+| Contratos (`contracts/`) | Declaram colunas, tipos lógicos, nulabilidade, chaves e grão de cada uma das 8 fontes. |
+| Bronze | Valida os CSVs contra os contratos e grava um Parquet por fonte, com os campos de origem como texto e os metadados `_batch_id`, `_ingested_at` e `_source_file`. Falha de contrato bloqueia a gravação e as etapas seguintes. |
+| Silver (views dbt) | `stg_orders` e `stg_order_reviews`: tipos convertidos, só as colunas necessárias. |
+| Gold (tabelas dbt) | `fct_delivery_reviews` (uma linha por pedido, avaliações agregadas antes do join) e `mart_delivery_review_summary` (resumo por faixa de entrega). |
+| Publicação | `publish_gold` copia as duas tabelas Gold para o schema `gold` de um Postgres no Neon, numa única transação (full refresh) com contagens reconciliadas; só roda depois dos testes dbt. |
+| Orquestração | DAG do Airflow com `ingest_bronze` → `build_and_test_models` → `publish_gold`, sem agendamento (o dataset é histórico). |
 
-## Dados
+### Decisões de projeto
 
-Fonte: [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) (Kaggle; confira os termos de uso vigentes antes de redistribuir). Baixe os CSVs manualmente — o repositório não os inclui nem tem script de download — e coloque-os na pasta local `dataset-ecommerce-brasil/`, na raiz. O `.gitignore` exclui essa pasta e dados derivados para evitar versionar datasets e artefatos. O índice e os contratos em `contracts/` declaram as fontes incluídas e o grão de cada uma.
+- O grão de cada tabela é explícito: pedidos por `order_id`, itens por (`order_id`, `order_item_id`). Alguns pedidos têm mais de uma avaliação, então elas são agregadas antes do join com o pedido, para não duplicar métricas.
+- IDs e CEPs são lidos como texto, para preservar zeros à esquerda.
+- Pedidos sem entrega ou sem avaliação são mantidos e classificados. Nenhuma linha é descartada em silêncio.
+- Repetir o mesmo `batch_id` substitui os artefatos do lote, sem duplicatas. O campo `_ingested_at` muda a cada execução, então os arquivos não ficam idênticos byte a byte.
+- Uma falha de contrato ou de teste interrompe o fluxo.
+- Geolocalização e marketing do Olist ficam fora do escopo, assim como Spark, Kafka, Iceberg, Delta Lake e object storage.
 
-IDs devem ser lidos como texto. Pagamentos e avaliações têm cardinalidade que precisa ser medida e tratada antes de joins. Não inclua geolocalização ou marketing no MVP sem revisar o escopo.
+## Como executar
 
-## Ambiente e execução Bronze
+Requisitos: [uv](https://docs.astral.sh/uv/) e Python 3.11+ (o ambiente do Airflow, em `airflow/`, usa Python 3.14; o `uv` o resolve sozinho).
 
-Use [uv](https://docs.astral.sh/uv/) e Python 3.11 ou superior para o pipeline de dados (o ambiente do Airflow, em `airflow/`, exige Python 3.14; o `uv` o resolve sozinho). O `pyproject.toml` declara as dependências diretas e o `uv.lock` fixa a resolução reproduzível:
+1. Baixe os CSVs do Kaggle (o repositório não os inclui; confira os termos de uso do dataset antes de redistribuir) e coloque-os em `dataset-ecommerce-brasil/`, na raiz.
+2. Instale as dependências travadas e rode tudo:
 
 ```bash
 uv sync
-uv run olist-bronze --batch-id olist-mvp-2026-10-25
+make pipeline BATCH_ID=olist-mvp-2026-10-25   # Bronze + dbt (modelos e testes)
 ```
 
-O comando valida os oito CSVs definidos em `contracts/olist_mvp.yaml` e escreve um Parquet por fonte em `data/bronze/<batch_id>/`, junto com `ingestion_report.json`. Use o mesmo `batch_id` para substituir o diretório do lote anterior depois de montar a nova versão em uma pasta temporária; outro identificador cria outro lote. Assim não se acumulam cópias do mesmo lote, mas `_ingested_at` muda a cada execução. A rotina tenta restaurar o lote anterior se a promoção falhar, mas a troca envolve mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. CSVs ausentes, colunas obrigatórias ausentes, nulos em campos não anuláveis, tipos lógicos inválidos, chaves repetidas ou linhas malformadas bloqueiam a gravação. Colunas extras são mantidas. Valores de origem são gravados como texto; datas permanecem sem conversão/fuso. Geolocalização não é processada.
+Os alvos do `Makefile`:
 
-Silver, Gold e DAG local do Airflow estão implementadas; a publicação remota continua pendente de decisão.
+| Comando | Função |
+|---|---|
+| `make bronze` | Valida os CSVs e grava a Bronze em `data/bronze/<batch_id>/`, com `ingestion_report.json`. |
+| `make transform` | Roda `dbt build` sobre uma Bronze existente e grava `data/warehouse.duckdb`. |
+| `make publish` | Publica a Gold do DuckDB no Postgres indicado por `NEON_DATABASE_URL`. |
+| `make pipeline` | Bronze e depois dbt; a falha da primeira etapa impede a segunda. Não publica. |
+| `make test` / `lint` / `format` / `typecheck` | pytest, Ruff (check e format) e ty. |
+| `make airflow` | Sobe o Airflow em modo `standalone` (desenvolvimento local, não produção). |
+| `make airflow-test` | Executa a DAG completa sem abrir a interface. |
 
-## Verificação registrada (29–31/10/2026)
+Execute o dbt por `make transform` ou `make pipeline`, não por `dbt build` direto: o `Makefile` passa a variável obrigatória `bronze_dir` com o caminho do lote.
 
-`make pipeline` com o lote `olist-mvp-2026-10-25`: Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados e 2 testes unitários); `make test` com 29 testes aprovados; `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros. A Gold tem 99.441 pedidos (768 sem avaliação).
+## Publicação no Postgres (Neon)
 
-## Testes
+A publicação é opcional e usa uma role restrita, não a do dono do banco. No SQL Editor do Postgres (com uma role administrativa):
+
+```sql
+CREATE SCHEMA IF NOT EXISTS gold;
+CREATE ROLE pipeline_publisher WITH LOGIN PASSWORD '<senha>' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+GRANT USAGE, CREATE ON SCHEMA gold TO pipeline_publisher;
+```
+
+Depois exporte a connection string da role como variável de ambiente (nunca no código nem no Git) e publique:
+
+```bash
+export NEON_DATABASE_URL='postgresql://pipeline_publisher:<senha>@<host>/<banco>?sslmode=require'
+make publish
+```
+
+Use uma senha só com letras e números, ou codifique caracteres especiais na URL. Os erros do driver nunca são impressos, para não vazar credenciais. Só `order_id`, status, datas e médias de nota são publicados; não há dados de clientes.
+
+## Testes e verificação
 
 | Camada | Comando | O que cobre |
 |---|---|---|
-| Contratos e Bronze (pytest) | `make test` | Todas as regras de validação (arquivo ausente, cabeçalho vazio ou duplicado, coluna obrigatória ausente, nulo proibido, tipo lógico inválido, chave simples e composta duplicada, linha malformada, nome reservado de metadado), `batch_id` inseguro, IDs como texto, nulos só onde permitido, metadados de lote, reexecução sem duplicar, preservação do último lote bom quando uma nova tentativa é bloqueada e rejeição de contratos inválidos. |
-| Definição da orquestração (pytest) | `make test` | DAG manual, sem backfill nem retries, uma execução por vez, `bronze` antes de `transform`, falha de etapa propaga, padrão de `batch_id` da DAG igual ao da Bronze, `make pipeline` sem prefixo que ignore falhas. A DAG é lida como código (AST), sem iniciar o Airflow. |
-| Lógica dos modelos (dbt unit tests) | `make transform` | Classificação das faixas de entrega por data de calendário, atraso em dias, média de várias avaliações por pedido, pedido sem avaliação preservado, e o resumo com peso igual por pedido (`models/unit_tests.yml`). Rodam antes dos modelos no `dbt build`. |
-| Dados reais (dbt data tests) | `make transform` | Chaves, nulos, domínio da nota, relacionamento avaliação→pedido, reconciliação de contagens entre Bronze, fato e resumo. |
-| Estilo e tipos | `make lint format typecheck` | Ruff e ty sobre `src`, `tests` (e `airflow/dags` no Ruff). |
-| DAG de ponta a ponta | `make airflow-test` | Executa a DAG completa em modo de teste. |
+| Contratos e Bronze (pytest) | `make test` | Arquivo ausente, cabeçalho vazio ou duplicado, coluna obrigatória ausente, nulo proibido, tipo lógico inválido, chave simples e composta duplicada, linha malformada, `batch_id` inseguro, reexecução sem duplicar e preservação do último lote bom quando uma nova tentativa é bloqueada. |
+| Publicação (pytest) | `make test` | Validação do schema, bloqueio com origem vazia ou inconsistente, variável ausente, reconciliação de contagens com rollback e erro sem vazar a senha. Usa DuckDB temporário e um destino falso, sem Postgres real. |
+| Definição da DAG (pytest) | `make test` | DAG manual, sem backfill nem retries, uma execução por vez, Bronze → transformação → publicação, falha propagada. A DAG é lida como código (AST), sem iniciar o Airflow. |
+| Lógica dos modelos (dbt unit tests) | `make transform` | Faixas de entrega, atraso em dias, média de várias avaliações por pedido, pedido sem avaliação preservado e resumo com peso igual por pedido. |
+| Dados reais (dbt data tests) | `make transform` | Chaves únicas, nulos, nota entre 1 e 5, avaliação→pedido, reconciliação de contagens entre Bronze, fato e resumo. |
+| Ponta a ponta | `make airflow-test` | Executa a DAG completa, inclusive a publicação (exige `NEON_DATABASE_URL`). |
 
-## Fora do MVP
+Última verificação registrada (01/11/2026): `pytest` com 38 testes aprovados; `ruff check`, `ruff format --check`, `ty check` e `uv lock --check` sem erros; Bronze com 8 fontes e 550.759 linhas; `dbt build` com `PASS=24 WARN=0 ERROR=0` (2 views, 2 tabelas, 18 testes de dados, 2 testes unitários); `make airflow-test` com as três tarefas (Bronze, dbt e publicação) em `success`, publicando 99.441 linhas na fato e 5 no resumo no Neon.
 
-Spark, Kafka, Iceberg, Delta Lake, object storage, ingestão contínua, GitHub Actions e Projeto 2 ficam fora deste MVP. Airflow local foi escolhido por Henrique; Neon continua fora até a publicação ser confirmada.
+## Limitações
 
+- Os dados são um snapshot histórico; as médias são descritivas e não permitem inferir causalidade.
+- `date_diff` compara datas de calendário, não horas.
+- A Bronze lê cada CSV inteiro em memória com pandas; para arquivos muito maiores seria preciso ler em blocos.
+- A troca do diretório do lote usa mais de uma renomeação e não promete recuperação automática após queda abrupta do processo. Não há coordenação para duas execuções simultâneas do mesmo `batch_id`.
+- Os modelos `stg_*` não têm teste unitário próprio; a regra de negócio está na Gold.
+- A orquestração `standalone` com SQLite serve ao desenvolvimento local. Não há CI. A publicação é um full refresh: substitui as tabelas do schema `gold` a cada execução, sem histórico de versões.
 
-## Implementação atual: contratos e Bronze
-
-Esta seção descreve somente o que existe no código-fonte. Silver, Gold e Airflow local estão implementados. A publicação remota no Neon continua pendente de decisão.
-
-### Fluxo executável
+## Estrutura do repositório
 
 ```text
-contracts/olist_mvp.yaml + contratos individuais
-        ↓ load_contracts
-CSV local ──→ validate_sources ── falha? relatório de bloqueio e encerramento
-        ↓ aprovado
-pandas.read_csv (texto) → metadados → Parquet via PyArrow
-        ↓
-relatório JSON + substituição do diretório do batch_id
+contracts/                 contratos YAML das 8 fontes e índice
+src/projeto1_pipeline_qualidade_dados/   contratos, ingestão Bronze (olist-bronze) e publicação (olist-publish)
+dbt_pipeline_qualidade/    modelos Silver/Gold, testes e testes unitários
+airflow/                   DAG e ambiente uv separado do Airflow
+tests/                     pytest sobre fixtures reduzidas
+Makefile                   atalhos para cada etapa
 ```
 
-O comando parte da raiz do repositório:
+## Licença
 
-```bash
-uv sync
-uv run olist-bronze --batch-id olist-mvp-2026-10-25
-```
-
-`--batch-id` identifica o lote lógico. Repetir o mesmo identificador substitui sua pasta; usar outro cria outra pasta. Os padrões são `contracts/olist_mvp.yaml` e `data/bronze`, configuráveis por `--contracts` e `--output-dir`. A validação percorre os CSVs e a ingestão os lê novamente; por isso a premissa operacional é que os arquivos de origem não mudem durante a execução.
-
-### Código-fonte e responsabilidades
-
-- `contracts.py`: `ContractDefinitionError` representa erro na definição YAML; `_matches_logical_type` verifica se cada valor atende ao tipo lógico sem transformá-lo; `load_contracts` lê e valida o índice e os oito contratos; `validate_sources` verifica a estrutura e o conteúdo dos CSVs e devolve um relatório sem incluir valores das linhas. A validação registra números de linha de amostra, não os valores pessoais nelas.
-- `bronze.py`: `IngestionBlocked` sinaliza dados reprovados pelos contratos; `_write_json` grava relatórios por arquivo temporário e substituição; `ingest_batch` valida, monta Parquets em staging, grava relatório e promove a pasta do lote; `main` interpreta argumentos CLI, mostra resumo e retorna código de saída 0 ou 1.
-- `tests/test_contracts_and_bronze.py`: fixtures pequenas exercitam aceitação de colunas extras, bloqueio de coluna ausente/nulo proibido, substituição do mesmo lote sem acumular arquivos e bloqueio da gravação com relatório quando a entrada é inválida.
-
-### Funções e decisões importantes
-
-`_matches_logical_type(value, logical_type)` aceita texto sem conversão; tenta `int` para inteiro; usa `Decimal` e exige valor finito para decimal; e para timestamp exige formato de data/hora ISO reconhecido, sem fuso. A checagem de timestamp combina expressão regular e `datetime.fromisoformat`: a expressão limita o formato esperado e o parser rejeita datas impossíveis. A função retorna falso para tipos não suportados ou valores inválidos.
-
-`load_contracts(index_path)` resolve o caminho do índice, carrega YAML com `yaml.safe_load`, confirma exatamente oito arquivos/contratos, impede caminhos nos nomes, duplicações, inconsistência entre arquivos incluídos e contratos, inclusão de geolocalização e chaves vazias, repetidas, não declaradas ou anuláveis. Também confirma os tipos lógicos permitidos e retorna a pasta de origem junto da lista dos contratos. Erros de leitura ou YAML são convertidos em `ContractDefinitionError`, preservando a causa original.
-
-`validate_sources(raw_dir, contracts)` processa cada fonte. Verifica existência e cabeçalho, cabeçalhos duplicados, colunas obrigatórias ausentes, colunas extras (aceitas e reportadas), colisão com nomes reservados de metadados, largura de cada linha, campos nulos proibidos, tipo lógico e unicidade da chave. Não para no primeiro problema: acumula regras e amostras de números de linha para diagnóstico. O retorno contém `passed`, detalhes por arquivo, `issue_count` (regras/problemas registrados) e `error_count` (ocorrências, com valor padrão 1 para regras sem contagem explícita). A escala CSV conta registros lógicos, não necessariamente linhas físicas quando há campos multilinha entre aspas.
-
-`ingest_batch(...)` primeiro restringe `batch_id` a 1–100 caracteres seguros para nomes de pasta. Carrega contratos e valida todas as fontes antes de escrever Parquet. Define horário UTC, cria relatório com contagens e caminhos; se reprovado, salva em `data/bronze/_reports/<batch_id>.json` e lança `IngestionBlocked`. Se aprovado, lê cada CSV com pandas como string, desativa inferência de valores ausentes, verifica se a contagem ainda bate com a validação, acrescenta `_batch_id`, `_ingested_at` e `_source_file`, e grava Parquet usando engine PyArrow. A pasta temporária é promovida ao destino; se já existe uma saída do mesmo lote, ela é movida para backup e restaurada se a promoção falhar. O backup é removido após sucesso. Erros durante a execução limpam staging quando possível, registram falha e relançam a exceção.
-
-A reexecução é idempotente no sentido operacional de não anexar uma cópia adicional do lote: a pasta anterior é substituída. Não é uma transação de filesystem com garantia contra queda de energia entre renomeações, nem produz arquivos idênticos byte a byte: o timestamp de ingestão muda. Não há coordenação para duas execuções concorrentes com o mesmo `batch_id`. Se a validação falhar numa tentativa posterior, a saída anteriormente bem-sucedida permanece; consumidores devem conferir o relatório da tentativa, para não confundir uma saída antiga com o resultado atual.
-
-`main()` usa `argparse` para os argumentos, captura erros esperados de contrato/ingestão/arquivo/valor, escreve a mensagem em stderr e retorna 1. No sucesso imprime JSON resumido e retorna 0. `if __name__ == "__main__"` permite execução como módulo/script; o entry point `olist-bronze` do `pyproject.toml` chama a mesma função.
-
-### Bibliotecas e ferramentas
-
-| Dependência | Uso efetivo |
-|---|---|
-| Python padrão: `csv` | Percorre CSVs e detecta estrutura antes da ingestão. `newline=""` deixa o módulo tratar corretamente as convenções de newline; `utf-8-sig` aceita UTF-8 com BOM. |
-| `pathlib.Path` | Manipula caminhos e operações de arquivo de forma independente de concatenação manual de strings. |
-| `re` | Valida o formato do timestamp e o identificador seguro do lote. |
-| `datetime` / `UTC` | Valida timestamps sem fuso na origem e registra o momento da ingestão em UTC. |
-| `decimal.Decimal` | Valida números decimais sem a aproximação binária típica de `float`. |
-| `typing.Any` | Tipagem auxiliar para estruturas carregadas de YAML/JSON, cujo formato é dinâmico. |
-| `json` | Serializa relatório legível por máquina. |
-| `uuid` | Gera nomes temporários únicos para gravação, staging e backup. |
-| `shutil` | Remove staging/backup de diretórios após falhas ou promoção concluída. |
-| `argparse` / `sys` | Interface de linha de comando e mensagens/códigos de erro. |
-| `PyYAML` (`yaml.safe_load`) | Lê contratos YAML sem construir objetos arbitrários do Python. YAML é configuração declarativa; a lógica executada continua no Python. |
-| `pandas` | Lê cada arquivo para um DataFrame e preserva campos como strings antes da gravação. Não faz análise de entrega nesta etapa. |
-| `PyArrow` | Engine que `DataFrame.to_parquet` usa para serializar os dados no formato Parquet. |
-| `uv` | Resolve/instala dependências declaradas; `uv.lock` fixa a resolução para instalação reproduzível. Não executa a lógica de qualidade. |
-| `dbt-duckdb` (dbt Core + DuckDB) | Executa os modelos SQL Silver/Gold e os testes de dados sobre os Parquets, gravando em `data/warehouse.duckdb`. |
-| Apache Airflow 3.3.2 | Orquestra Bronze → dbt na DAG local, em ambiente `uv` separado (`airflow/`). |
-| `make` | Atalhos repetíveis para as etapas, usados também pela DAG. |
-| `pytest` | Executa os testes automatizados. |
-| `Ruff` | Formata e analisa problemas comuns de Python. |
-| `ty` | Verifica estaticamente compatibilidade de tipos. |
-
-### Resultado documentado e limites
-
-Uma execução registrada do lote `olist-mvp-2026-10-25` processou oito fontes e 550.759 linhas, sem achados ou erros no relatório. Comparações CSV/Parquet não encontraram divergências, e a reexecução do lote foi verificada.
-
-A Bronze preserva os campos como texto. Ela não converte datas ou valores monetários para tipos analíticos, não calcula métricas, não agrega pagamentos/avaliações e não cria tabelas relacionais. Isso pertence às etapas futuras. O carregamento atual usa pandas para ler cada CSV integralmente em memória; para arquivos muito maiores, leitura em chunks ou outro desenho de memória precisaria ser avaliado.
-
-
-### Silver e Gold implementadas
-
-A transformação usa dbt com DuckDB local. O `dbt-duckdb` lê os Parquets diretamente, sem copiá-los para tabelas de entrada. O comando `make transform` passa ao dbt o diretório do lote `BRONZE_DIR`.
-
-- **Silver (views):** `stg_orders` converte os timestamps necessários e mantém uma linha por pedido; `stg_order_reviews` converte a nota e preserva cada avaliação no grão de origem. Comentários livres e campos fora da pergunta analítica não seguem para esses modelos.
-- **Gold (tabelas):** `fct_delivery_reviews` agrega as avaliações por pedido antes do `LEFT JOIN`, preservando pedidos sem avaliação e garantindo uma linha por pedido. `mart_delivery_review_summary` resume por faixa de entrega.
-- **Faixas:** `early` significa entrega antes da data estimada; `on_time`, no mesmo dia; `late`, depois da data estimada; `not_delivered`, sem data real de entrega; `delivered_missing_timestamp`, status `delivered` sem data real. `delivery_delay_days` é negativo para antecipação, zero no dia e positivo para atraso. A comparação usa datas de calendário.
-- **Nota:** várias avaliações do mesmo pedido são primeiro resumidas pela média. A Gold calcula a média dessas médias, dando o mesmo peso a cada pedido avaliado, e apresenta separadamente a quantidade de pedidos avaliados e de registros de avaliação.
-- **Qualidade:** `dbt build` executa modelos e testes de nulos, unicidade, chave composta de avaliação, domínio da nota, relacionamento avaliação→pedido, preservação de contagem de pedidos e reconciliação da Gold. Falha retorna código não-zero. Não há etapa de publicação remota, então os resultados ficam no banco local.
-
-Execute o dbt pelo `make transform` (ou `make pipeline`), não por `dbt build` direto: o Makefile passa a variável obrigatória `bronze_dir` com o caminho do lote, e sem ela as fontes não resolvem.
-
-Para executar tudo em sequência, com falha da Bronze impedindo a transformação:
-
-```bash
-make pipeline BATCH_ID=olist-mvp-2026-10-25
-```
-
-O banco DuckDB fica em `data/warehouse.duckdb` (ignorado pelo Git). `make transform` pode ser usado para reconstruir as camadas sobre uma Bronze já existente.
-
-
-## Orquestração local com Airflow
-
-Henrique escolheu Airflow como orquestrador. A DAG `olist_delivery_review_pipeline` tem duas tarefas sequenciais: ingestão Bronze e `dbt build` (transformação + testes). Ambas chamam os mesmos alvos do Makefile usados na execução manual; não duplicam as regras do pipeline.
-
-A DAG não tem calendário (`schedule=None`) nem backfill (`catchup=False`): o dataset é histórico e a execução é manual. O parâmetro `batch_id` tem validação de caracteres e tamanho; execuções simultâneas da DAG são limitadas a uma; retries automáticos ficam em zero para não repetir falhas determinísticas de contrato.
-
-Airflow tem um ambiente `uv` separado em `airflow/`, travado com constraints oficiais para Airflow 3.3.2 e Python 3.14. Isso evita misturar as dependências de orquestração com as do pipeline analítico. O banco SQLite e logs locais ficam em `.airflow/`, ignorado pelo Git. O modo `standalone` é para desenvolvimento local, não produção; ele cria acesso administrativo local e informa as credenciais no terminal. Consulte o [Quick Start oficial do Airflow](https://airflow.apache.org/docs/apache-airflow/stable/start.html).
-
-Para iniciar a interface local:
-
-```bash
-make airflow
-```
-
-Para executar uma DAG de teste ponta a ponta, sem iniciar a interface:
-
-```bash
-make airflow-test
-```
-
-A DAG testada usa por padrão o lote `olist-mvp-2026-10-25`; na interface, o parâmetro `batch_id` pode selecionar outro lote presente em `data/bronze` ou reconstruir o lote usando os CSVs locais. O dataset precisa existir no caminho indicado pelos contratos.
+Código sob licença MIT (ver `LICENSE`). Os dados da Olist seguem os termos próprios do dataset no Kaggle e não são redistribuídos aqui.
