@@ -35,27 +35,22 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def ingest_batch(
-    *,
-    index_path: Path,
-    output_dir: Path,
-    batch_id: str,
-    ingested_at: str | None = None,
-) -> dict[str, Any]:
-    """Valida os oito CSVs e substitui o diretório do mesmo lote."""
+def _validate_batch_id(batch_id: str) -> None:
     # batch_id vira nome de pasta: o padrão barra "..", "/" e espaços.
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", batch_id):
         raise ValueError(
             "batch_id deve ter 1–100 caracteres: letras, números, ponto, hífen ou sublinhado."
         )
 
-    raw_dir, contracts = load_contracts(index_path)
-    validation = validate_sources(raw_dir, contracts)
-    timestamp = ingested_at or datetime.now(UTC).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
-    )
-    output_dir = output_dir.resolve()
-    report: dict[str, Any] = {
+
+def _utc_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _new_report(
+    batch_id: str, timestamp: str, raw_dir: Path, validation: dict[str, Any]
+) -> dict[str, Any]:
+    return {
         "batch_id": batch_id,
         "ingested_at": timestamp,
         "status": "blocked" if not validation["passed"] else "validated",
@@ -66,6 +61,75 @@ def ingest_batch(
         "error_count": validation["error_count"],
         "parquet_files": [],
     }
+
+
+def _write_parquet(
+    contract: dict[str, Any],
+    file_result: dict[str, Any],
+    raw_dir: Path,
+    stage_dir: Path,
+    batch_id: str,
+    timestamp: str,
+) -> Path:
+    """Converte um CSV validado em Parquet, com os metadados de lote."""
+    source_file = contract["source_file"]
+    # Tudo como texto e sem inferência de nulos: IDs e CEPs mantêm os zeros
+    # à esquerda, e a tipagem fica para a Silver.
+    frame = pd.read_csv(
+        raw_dir / source_file,
+        dtype="string",
+        keep_default_na=False,
+        na_filter=False,
+        encoding="utf-8-sig",
+    )
+    if len(frame) != file_result["rows_read"]:
+        raise RuntimeError(f"Contagem mudou entre validação e leitura: {source_file}")
+
+    # Campo vazio em coluna anulável representa nulo na origem; os demais
+    # campos permanecem textuais para preservar IDs, datas e valores brutos.
+    for column, definition in contract["columns"].items():
+        if definition["nullable"]:
+            frame[column] = frame[column].mask(frame[column].eq(""), pd.NA)
+
+    frame["_batch_id"] = batch_id
+    frame["_ingested_at"] = timestamp
+    frame["_source_file"] = source_file
+    parquet_path = stage_dir / f"{Path(source_file).stem}.parquet"
+    frame.to_parquet(parquet_path, index=False, engine="pyarrow")
+    file_result["bronze_rows"] = len(frame)
+    return parquet_path
+
+
+def _promote(stage_dir: Path, final_dir: Path, backup_dir: Path) -> None:
+    """Troca o lote antigo pelo novo, com volta atrás se a promoção falhar."""
+    # O lote antigo vira backup e só é apagado depois que o novo assume o lugar.
+    if final_dir.exists():
+        final_dir.replace(backup_dir)
+    try:
+        stage_dir.replace(final_dir)
+    except OSError:
+        if backup_dir.exists() and not final_dir.exists():
+            backup_dir.replace(final_dir)
+        raise
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
+def ingest_batch(
+    *,
+    index_path: Path,
+    output_dir: Path,
+    batch_id: str,
+    ingested_at: str | None = None,
+) -> dict[str, Any]:
+    """Valida os oito CSVs e substitui o diretório do mesmo lote."""
+    _validate_batch_id(batch_id)
+
+    raw_dir, contracts = load_contracts(index_path)
+    validation = validate_sources(raw_dir, contracts)
+    timestamp = ingested_at or _utc_timestamp()
+    output_dir = output_dir.resolve()
+    report = _new_report(batch_id, timestamp, raw_dir, validation)
     if not validation["passed"]:
         _write_json(output_dir / "_reports" / f"{batch_id}.json", report)
         raise IngestionBlocked(
@@ -79,35 +143,10 @@ def ingest_batch(
     stage_dir.mkdir()
     try:
         for contract, file_result in zip(contracts, validation["files"], strict=True):
-            source_file = contract["source_file"]
-            # Tudo como texto e sem inferência de nulos: IDs e CEPs mantêm os zeros
-            # à esquerda, e a tipagem fica para a Silver.
-            frame = pd.read_csv(
-                raw_dir / source_file,
-                dtype="string",
-                keep_default_na=False,
-                na_filter=False,
-                encoding="utf-8-sig",
+            parquet_path = _write_parquet(
+                contract, file_result, raw_dir, stage_dir, batch_id, timestamp
             )
-            expected_rows = file_result["rows_read"]
-            if len(frame) != expected_rows:
-                raise RuntimeError(
-                    f"Contagem mudou entre validação e leitura: {source_file}"
-                )
-
-            # Campo vazio em coluna anulável representa nulo na origem; os demais
-            # campos permanecem textuais para preservar IDs, datas e valores brutos.
-            for column, definition in contract["columns"].items():
-                if definition["nullable"]:
-                    frame[column] = frame[column].mask(frame[column].eq(""), pd.NA)
-
-            frame["_batch_id"] = batch_id
-            frame["_ingested_at"] = timestamp
-            frame["_source_file"] = source_file
-            parquet_path = stage_dir / f"{Path(source_file).stem}.parquet"
-            frame.to_parquet(parquet_path, index=False, engine="pyarrow")
             report["parquet_files"].append(f"{batch_id}/{parquet_path.name}")
-            file_result["bronze_rows"] = len(frame)
 
         report["status"] = "succeeded"
         report["total_bronze_rows"] = sum(
@@ -116,19 +155,7 @@ def ingest_batch(
         report["issue_count"] = 0
         report["error_count"] = 0
         _write_json(stage_dir / "ingestion_report.json", report)
-
-        # Troca em duas renomeações: o lote antigo vira backup e só é apagado
-        # depois que o novo assume o lugar, para poder voltar atrás se falhar.
-        if final_dir.exists():
-            final_dir.replace(backup_dir)
-        try:
-            stage_dir.replace(final_dir)
-        except OSError:
-            if backup_dir.exists() and not final_dir.exists():
-                backup_dir.replace(final_dir)
-            raise
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir, ignore_errors=True)
+        _promote(stage_dir, final_dir, backup_dir)
         return report
     except Exception as exc:
         if stage_dir.exists():
